@@ -30,6 +30,10 @@ DB_PATH = "/data/masha.db"
 CALENDAR_TZ = ZoneInfo("Europe/Moscow")
 
 
+# =========================================================
+# ИНСТРУКЦИЯ МАШИ 2.0
+# =========================================================
+
 ASSISTANT_INSTRUCTIONS = """
 Ты Маша 2.0 — личный рабочий ассистент Маши.
 
@@ -53,6 +57,15 @@ ASSISTANT_INSTRUCTIONS = """
 - По рабочему правилу встречу без необходимых материалов можно отменять.
 - Материалы к важным встречам желательно получать минимум за 2 суток,
   лучше заранее.
+
+ПРЕДПОЧТЕНИЯ ПО КАЛЕНДАРЮ
+
+- Понедельник желательно оставлять под фокусную работу.
+- Пятница предпочтительна для внешних встреч.
+- Желательный рабочий диапазон примерно 10:30–19:00.
+- Между встречами желательно оставлять 15–30 минут воздуха.
+- Обед не нужно совмещать с внутренними встречами.
+- Сохраняй свободные окна под срочные запросы и собеседования.
 
 ЧЕК-ЛИСТ ВСТРЕЧ
 
@@ -87,24 +100,55 @@ ASSISTANT_INSTRUCTIONS = """
 - Не говори, что поставила напоминание, если реальное напоминание
   технически не создано.
 
+ВАЖНО О КАЛЕНДАРЕ
+
+Если передан раздел КАЛЕНДАРЬ, это реальные события
+из Яндекс.Календаря.
+
+Не выдумывай отсутствующие сведения.
+
+Если в событии нет описания, это не всегда означает, что повестки
+действительно нет: говори "в данных календаря не вижу повестки",
+а не "повестки нет".
+
+Если нет location, говори "в данных события не вижу адреса".
+
+Если нет ссылки, не утверждай автоматически, что встреча точно в Zoom.
+
+Если два события стоят подряд без паузы, обязательно отметь это.
+
+Если события пересекаются по времени — это приоритетный риск.
+
+Если есть обед — отметь это положительно.
+
+Если обеда нет в плотный рабочий день — подсвети.
+
+Сначала называй действительно важные риски, а потом менее критичные.
+
 ВАЖНО О ФОРМАТЕ
 
-Telegram сейчас получает обычный текст.
-Не используй Markdown-разметку.
-Не ставь **, *, ### для оформления.
+Telegram получает обычный текст.
+Не используй Markdown.
+Не используй **, *, ### для оформления.
+
+Пиши компактно.
+Для проверки календаря удобно использовать:
+
+"Главное"
+"Что проверить"
+"Ок"
+
+но не превращай ответ в огромный отчет.
 
 ВАЖНО О ПАМЯТИ
 
-Если ниже есть раздел ПОСТОЯННАЯ ПАМЯТЬ,
+Если ниже есть ПОСТОЯННАЯ ПАМЯТЬ,
 это реально сохраненные сведения.
 
-Если ниже есть раздел ОТКРЫТЫЕ ЗАДАЧИ,
+Если ниже есть ОТКРЫТЫЕ ЗАДАЧИ,
 это реально сохраненные незакрытые задачи.
 
-Если ниже есть раздел КАЛЕНДАРЬ,
-это реальные события, полученные из Яндекс.Календаря.
-
-Не выдумывай события, которых нет в переданном календаре.
+Не выдумывай сохраненные факты или задачи.
 """
 
 
@@ -212,6 +256,7 @@ def get_open_tasks(chat_id):
     ).fetchall()
 
     conn.close()
+
     return rows
 
 
@@ -287,6 +332,7 @@ def get_memories(chat_id):
     ).fetchall()
 
     conn.close()
+
     return rows
 
 
@@ -314,7 +360,7 @@ def delete_memory(chat_id, memory_id):
 
 
 # =========================================================
-# ПАМЯТЬ ТЕКУЩЕГО ДИАЛОГА
+# ПАМЯТЬ ТЕКУЩЕГО ДИАЛОГА OPENAI
 # =========================================================
 
 def get_previous_response_id(chat_id):
@@ -408,7 +454,7 @@ def send_message(chat_id, text):
 
 
 # =========================================================
-# ЯНДЕКС.КАЛЕНДАРЬ — ТОЛЬКО ЧТЕНИЕ
+# ЯНДЕКС.КАЛЕНДАРЬ
 # =========================================================
 
 def get_yandex_client():
@@ -460,6 +506,56 @@ def normalize_calendar_datetime(value):
     return None, False
 
 
+def extract_attendees(component):
+    attendees = []
+
+    raw_attendees = component.get(
+        "ATTENDEE"
+    )
+
+    if not raw_attendees:
+        return attendees
+
+    if not isinstance(
+        raw_attendees,
+        list
+    ):
+        raw_attendees = [
+            raw_attendees
+        ]
+
+    for attendee in raw_attendees:
+        value = str(attendee)
+
+        name = ""
+
+        try:
+            name = attendee.params.get(
+                "CN",
+                ""
+            )
+        except Exception:
+            pass
+
+        participation = ""
+
+        try:
+            participation = attendee.params.get(
+                "PARTSTAT",
+                ""
+            )
+        except Exception:
+            pass
+
+        attendees.append({
+            "name": str(name),
+            "value": value,
+            "partstat": str(participation)
+        })
+
+    return attendees
+
+
 def extract_event_from_ical(
     ical_data,
     calendar_name=""
@@ -467,7 +563,10 @@ def extract_event_from_ical(
     if not ical_data:
         return []
 
-    if isinstance(ical_data, str):
+    if isinstance(
+        ical_data,
+        str
+    ):
         ical_data = ical_data.encode(
             "utf-8"
         )
@@ -489,11 +588,9 @@ def extract_event_from_ical(
         if not dtstart_property:
             continue
 
-        start_raw = dtstart_property.dt
-
         start, all_day = (
             normalize_calendar_datetime(
-                start_raw
+                dtstart_property.dt
             )
         )
 
@@ -548,6 +645,10 @@ def extract_event_from_ical(
             )
         )
 
+        attendees = extract_attendees(
+            component
+        )
+
         result.append({
             "uid": uid,
             "summary": summary,
@@ -557,13 +658,17 @@ def extract_event_from_ical(
             "location": location,
             "description": description,
             "url": url,
-            "calendar": calendar_name
+            "calendar": calendar_name,
+            "attendees": attendees
         })
 
     return result
 
 
-def get_calendar_events(start_dt, end_dt):
+def get_calendar_events(
+    start_dt,
+    end_dt
+):
     calendars = get_yandex_calendars()
 
     collected = []
@@ -607,17 +712,12 @@ def get_calendar_events(start_dt, end_dt):
 
             except Exception as e:
                 print(
-                    "Calendar event parse error:",
+                    "Calendar parse error:",
                     repr(e)
                 )
 
     # -----------------------------------------------------
-    # УДАЛЯЕМ ДУБЛИ
-    #
-    # Одна и та же встреча может присутствовать
-    # одновременно в календаре Маши и календаре МС.
-    #
-    # Название календаря специально НЕ включаем в ключ.
+    # УДАЛЯЕМ ДУБЛИ ИЗ РАЗНЫХ КАЛЕНДАРЕЙ
     # -----------------------------------------------------
 
     unique = {}
@@ -651,10 +751,10 @@ def get_calendar_events(start_dt, end_dt):
             unique[key] = event
             continue
 
-        # Если дубль из другого календаря содержит
-        # больше полезной информации, дополняем первую запись.
-
         existing = unique[key]
+
+        # Если второй экземпляр содержит больше информации,
+        # дополняем первый.
 
         if (
             not existing["location"]
@@ -680,6 +780,14 @@ def get_calendar_events(start_dt, end_dt):
                 event["url"]
             )
 
+        if (
+            not existing["attendees"]
+            and event["attendees"]
+        ):
+            existing["attendees"] = (
+                event["attendees"]
+            )
+
     result = list(
         unique.values()
     )
@@ -690,6 +798,10 @@ def get_calendar_events(start_dt, end_dt):
 
     return result
 
+
+# =========================================================
+# ОБЫЧНЫЙ ВЫВОД КАЛЕНДАРЯ
+# =========================================================
 
 def format_event(event):
     start = event["start"]
@@ -705,8 +817,8 @@ def format_event(event):
         )
 
     else:
-        time_text = start.strftime(
-            "%H:%M"
+        time_text = (
+            start.strftime("%H:%M")
         )
 
     text = (
@@ -755,7 +867,9 @@ def format_calendar_day(
 
     for event in events:
         lines.append(
-            format_event(event)
+            format_event(
+                event
+            )
         )
 
     return "\n\n".join(
@@ -821,9 +935,11 @@ def format_calendar_period(
     for event_date in sorted(
         grouped.keys()
     ):
-        weekday = weekday_names[
-            event_date.weekday()
-        ]
+        weekday = (
+            weekday_names[
+                event_date.weekday()
+            ]
+        )
 
         lines.append(
             f"{weekday}, "
@@ -834,7 +950,9 @@ def format_calendar_period(
             event_date
         ]:
             lines.append(
-                format_event(event)
+                format_event(
+                    event
+                )
             )
 
         lines.append("")
@@ -845,10 +963,196 @@ def format_calendar_period(
 
 
 # =========================================================
-# КОНТЕКСТ ПАМЯТИ И ЗАДАЧ
+# КАЛЕНДАРНЫЙ КОНТЕКСТ ДЛЯ ИИ
 # =========================================================
 
-def build_saved_context(chat_id):
+def calendar_context(
+    start_date,
+    days=1
+):
+    start_dt = datetime(
+        start_date.year,
+        start_date.month,
+        start_date.day,
+        tzinfo=CALENDAR_TZ
+    )
+
+    end_dt = (
+        start_dt
+        + timedelta(days=days)
+    )
+
+    events = get_calendar_events(
+        start_dt,
+        end_dt
+    )
+
+    lines = [
+        "КАЛЕНДАРЬ:",
+        (
+            "Период: "
+            f"{start_date.strftime('%d.%m.%Y')}"
+            + (
+                ""
+                if days == 1
+                else (
+                    " — "
+                    + (
+                        start_date
+                        + timedelta(
+                            days=days - 1
+                        )
+                    ).strftime(
+                        "%d.%m.%Y"
+                    )
+                )
+            )
+        )
+    ]
+
+    if not events:
+        lines.append(
+            "Событий нет."
+        )
+
+        return "\n".join(
+            lines
+        )
+
+    for index, event in enumerate(
+        events,
+        start=1
+    ):
+        start = event["start"]
+        end = event["end"]
+
+        if event["all_day"]:
+            when = (
+                start.strftime(
+                    "%d.%m.%Y"
+                )
+                + " весь день"
+            )
+
+        elif end:
+            when = (
+                start.strftime(
+                    "%d.%m.%Y %H:%M"
+                )
+                + "–"
+                + end.strftime(
+                    "%H:%M"
+                )
+            )
+
+        else:
+            when = start.strftime(
+                "%d.%m.%Y %H:%M"
+            )
+
+        lines.append("")
+        lines.append(
+            f"Событие {index}"
+        )
+
+        lines.append(
+            f"Название: "
+            f"{event['summary']}"
+        )
+
+        lines.append(
+            f"Время: {when}"
+        )
+
+        lines.append(
+            "Календарь-источник: "
+            f"{event['calendar']}"
+        )
+
+        if event["location"]:
+            lines.append(
+                "Место/адрес: "
+                + event["location"]
+            )
+        else:
+            lines.append(
+                "Место/адрес: "
+                "не указано в данных события"
+            )
+
+        if event["description"]:
+            # Не отправляем модели бесконечно длинные описания.
+            description = (
+                event["description"]
+                .strip()
+            )
+
+            if len(description) > 2500:
+                description = (
+                    description[:2500]
+                    + "..."
+                )
+
+            lines.append(
+                "Описание события: "
+                + description
+            )
+
+        else:
+            lines.append(
+                "Описание события: "
+                "не указано"
+            )
+
+        if event["url"]:
+            lines.append(
+                "URL события: "
+                + event["url"]
+            )
+
+        attendees = event.get(
+            "attendees",
+            []
+        )
+
+        if attendees:
+            attendee_lines = []
+
+            for attendee in attendees:
+                name = (
+                    attendee["name"]
+                    or attendee["value"]
+                )
+
+                partstat = (
+                    attendee["partstat"]
+                    or "не указан"
+                )
+
+                attendee_lines.append(
+                    f"{name} "
+                    f"(статус: {partstat})"
+                )
+
+            lines.append(
+                "Участники: "
+                + "; ".join(
+                    attendee_lines
+                )
+            )
+
+    return "\n".join(
+        lines
+    )
+
+
+# =========================================================
+# ПАМЯТЬ + ЗАДАЧИ ДЛЯ OPENAI
+# =========================================================
+
+def build_saved_context(
+    chat_id
+):
     memories = get_memories(
         chat_id
     )
@@ -893,14 +1197,19 @@ def build_saved_context(chat_id):
 # OPENAI
 # =========================================================
 
-def extract_openai_text(data):
+def extract_openai_text(
+    data
+):
     texts = []
 
     for item in data.get(
         "output",
         []
     ):
-        if item.get("type") != "message":
+        if (
+            item.get("type")
+            != "message"
+        ):
             continue
 
         for content in item.get(
@@ -917,7 +1226,9 @@ def extract_openai_text(data):
                 )
 
                 if text:
-                    texts.append(text)
+                    texts.append(
+                        text
+                    )
 
     if texts:
         return "\n".join(
@@ -997,6 +1308,10 @@ def ask_openai(
         timeout=90
     )
 
+    # Если старая цепочка OpenAI недоступна,
+    # спокойно начинаем новую.
+    # SQLite-память и задачи при этом остаются.
+
     if (
         response.status_code == 400
         and previous_id
@@ -1050,10 +1365,75 @@ def ask_openai(
 
 
 # =========================================================
+# УМНАЯ ПРОВЕРКА КАЛЕНДАРЯ
+# =========================================================
+
+def review_calendar(
+    chat_id,
+    target_date,
+    days,
+    user_request
+):
+    context = calendar_context(
+        target_date,
+        days
+    )
+
+    review_instruction = """
+ЗАДАЧА:
+проверь реальный календарь Маши как внимательный бизнес-ассистент.
+
+Проверь:
+
+1. Есть ли пересечения встреч.
+2. Есть ли встречи подряд без 15–30 минут воздуха.
+3. Есть ли нормальное окно на обед.
+4. Если день плотный и обеда нет — предупреди.
+5. Есть ли у событий описание/повестка в доступных данных.
+6. Есть ли место или адрес там, где это выглядит важным.
+7. Если в названии или описании явно виден Zoom/онлайн-звонок,
+   проверь, видна ли ссылка в доступных данных.
+8. Посмотри на статусы участников, если они переданы.
+9. Учитывай сохраненные задачи и постоянную память Маши.
+10. Не придумывай, является ли встреча внешней, Zoom-встречей
+    или собеседованием, если это не следует из данных.
+11. Не пугай Машу мелочами. Сначала только то, что действительно
+    требует внимания.
+
+Ответ должен быть практичным.
+
+Если всё хорошо, так и скажи.
+
+Если есть проблемы, желательно написать конкретно:
+"14:00 HR — в данных не вижу..."
+а не общими словами.
+
+Отдельно скажи, что выглядит хорошо:
+например, есть обед, есть нормальные окна, нет пересечений.
+
+Не утверждай, что что-то исправила в календаре.
+"""
+
+    extra_context = (
+        context
+        + "\n\n"
+        + review_instruction
+    )
+
+    return ask_openai(
+        chat_id,
+        user_request,
+        extra_context=extra_context
+    )
+
+
+# =========================================================
 # ПОКАЗ ЗАДАЧ И ПАМЯТИ
 # =========================================================
 
-def show_tasks(chat_id):
+def show_tasks(
+    chat_id
+):
     tasks = get_open_tasks(
         chat_id
     )
@@ -1063,6 +1443,7 @@ def show_tasks(chat_id):
             chat_id,
             "Сейчас открытых задач нет."
         )
+
         return
 
     lines = [
@@ -1081,7 +1462,9 @@ def show_tasks(chat_id):
     )
 
 
-def show_memory(chat_id):
+def show_memory(
+    chat_id
+):
     memories = get_memories(
         chat_id
     )
@@ -1092,6 +1475,7 @@ def show_memory(chat_id):
             "В постоянной памяти "
             "пока ничего нет."
         )
+
         return
 
     lines = [
@@ -1114,7 +1498,9 @@ def show_memory(chat_id):
 # ТЕКСТОВАЯ НОРМАЛИЗАЦИЯ
 # =========================================================
 
-def strip_punctuation(text):
+def strip_punctuation(
+    text
+):
     return re.sub(
         r"[?!.,]+$",
         "",
@@ -1137,6 +1523,10 @@ def try_handle_calendar(
     today = datetime.now(
         CALENDAR_TZ
     ).date()
+
+    # -----------------------------------------------------
+    # ОБЫЧНЫЙ ПРОСМОТР
+    # -----------------------------------------------------
 
     today_phrases = {
         "/today",
@@ -1174,6 +1564,151 @@ def try_handle_calendar(
         "покажи встречи на неделю"
     }
 
+    # -----------------------------------------------------
+    # УМНАЯ ПРОВЕРКА
+    # -----------------------------------------------------
+
+    review_today_phrases = {
+        "/checktoday",
+        "проверь сегодня",
+        "проверь мой сегодня",
+        "проверь сегодняшний день",
+        "проверь календарь на сегодня",
+        "проверь мой календарь на сегодня",
+        "проверь мои встречи сегодня"
+    }
+
+    review_tomorrow_phrases = {
+        "/checktomorrow",
+        "проверь завтра",
+        "проверь мой завтра",
+        "проверь завтрашний день",
+        "проверь календарь на завтра",
+        "проверь мой календарь на завтра",
+        "проверь мои встречи завтра"
+    }
+
+    review_week_phrases = {
+        "/checkweek",
+        "проверь неделю",
+        "проверь мою неделю",
+        "проверь календарь на неделю",
+        "проверь мой календарь на неделю",
+        "проверь встречи на неделю"
+    }
+
+    # -----------------------------------------------------
+    # УМНАЯ ПРОВЕРКА СНАЧАЛА
+    # -----------------------------------------------------
+
+    if clean in review_today_phrases:
+        try:
+            send_message(
+                chat_id,
+                "Проверяю календарь..."
+            )
+
+            answer = review_calendar(
+                chat_id,
+                today,
+                1,
+                text
+            )
+
+            send_message(
+                chat_id,
+                answer
+            )
+
+        except Exception as e:
+            print(
+                "Calendar review error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не смогла проверить календарь. "
+                "Посмотри лог в Railway."
+            )
+
+        return True
+
+    if clean in review_tomorrow_phrases:
+        try:
+            tomorrow = (
+                today
+                + timedelta(days=1)
+            )
+
+            send_message(
+                chat_id,
+                "Проверяю календарь..."
+            )
+
+            answer = review_calendar(
+                chat_id,
+                tomorrow,
+                1,
+                text
+            )
+
+            send_message(
+                chat_id,
+                answer
+            )
+
+        except Exception as e:
+            print(
+                "Calendar review error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не смогла проверить календарь. "
+                "Посмотри лог в Railway."
+            )
+
+        return True
+
+    if clean in review_week_phrases:
+        try:
+            send_message(
+                chat_id,
+                "Проверяю неделю..."
+            )
+
+            answer = review_calendar(
+                chat_id,
+                today,
+                7,
+                text
+            )
+
+            send_message(
+                chat_id,
+                answer
+            )
+
+        except Exception as e:
+            print(
+                "Calendar review error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не смогла проверить календарь. "
+                "Посмотри лог в Railway."
+            )
+
+        return True
+
+    # -----------------------------------------------------
+    # ОБЫЧНЫЙ ПРОСМОТР
+    # -----------------------------------------------------
+
     if clean in today_phrases:
         try:
             result = format_calendar_day(
@@ -1196,7 +1731,7 @@ def try_handle_calendar(
                 chat_id,
                 "Не смогла прочитать "
                 "Яндекс.Календарь. "
-                "Посмотри мой лог в Railway."
+                "Посмотри лог в Railway."
             )
 
         return True
@@ -1228,18 +1763,16 @@ def try_handle_calendar(
                 chat_id,
                 "Не смогла прочитать "
                 "Яндекс.Календарь. "
-                "Посмотри мой лог в Railway."
+                "Посмотри лог в Railway."
             )
 
         return True
 
     if clean in week_phrases:
         try:
-            result = (
-                format_calendar_period(
-                    today,
-                    7
-                )
+            result = format_calendar_period(
+                today,
+                7
             )
 
             send_message(
@@ -1257,7 +1790,7 @@ def try_handle_calendar(
                 chat_id,
                 "Не смогла прочитать "
                 "Яндекс.Календарь. "
-                "Посмотри мой лог в Railway."
+                "Посмотри лог в Railway."
             )
 
         return True
@@ -1283,32 +1816,35 @@ def try_handle_command(
         normalized
     )
 
+    # -----------------------------------------------------
     # START
+    # -----------------------------------------------------
 
     if clean == "/start":
         send_message(
             chat_id,
             "Привет 👋 Я Маша 2.0.\n\n"
-            "У меня есть ИИ, "
-            "постоянная память, "
-            "база задач и чтение "
-            "Яндекс.Календаря."
+            "У меня есть ИИ, постоянная память, "
+            "база задач и Яндекс.Календарь."
         )
 
         return True
 
+    # -----------------------------------------------------
     # HEALTH
+    # -----------------------------------------------------
 
     if clean == "/health":
         send_message(
             chat_id,
-            "Я работаю ✅\n"
-            "Память и база доступны."
+            "Я работаю ✅"
         )
 
         return True
 
-    # НОВЫЙ ДИАЛОГ
+    # -----------------------------------------------------
+    # NEW
+    # -----------------------------------------------------
 
     if clean == "/new":
         clear_previous_response_id(
@@ -1317,15 +1853,15 @@ def try_handle_command(
 
         send_message(
             chat_id,
-            "Готово. Начинаем "
-            "новый разговор.\n\n"
-            "Память и задачи "
-            "я не забыла."
+            "Готово. Начинаем новый разговор.\n\n"
+            "Память и задачи я не забыла."
         )
 
         return True
 
-    # ТЕСТ КАЛЕНДАРЯ
+    # -----------------------------------------------------
+    # CALENDAR CONNECTION
+    # -----------------------------------------------------
 
     if clean == "/calendar":
         try:
@@ -1350,9 +1886,8 @@ def try_handle_command(
                 )
 
             if names:
-                text_result = (
-                    "Связь с "
-                    "Яндекс.Календарём есть ✅\n\n"
+                result = (
+                    "Связь с Яндекс.Календарём есть ✅\n\n"
                     "Нашла календари:\n"
                     + "\n".join(
                         f"• {name}"
@@ -1361,15 +1896,14 @@ def try_handle_command(
                 )
 
             else:
-                text_result = (
-                    "К Яндекс.Календарю "
-                    "подключилась, "
+                result = (
+                    "К Яндекс.Календарю подключилась, "
                     "но календарей не нашла."
                 )
 
             send_message(
                 chat_id,
-                text_result
+                result
             )
 
         except Exception as e:
@@ -1381,14 +1915,14 @@ def try_handle_command(
             send_message(
                 chat_id,
                 "Не получилось подключиться "
-                "к Яндекс.Календарю.\n\n"
-                "Посмотри Deploy Logs "
-                "в Railway."
+                "к Яндекс.Календарю."
             )
 
         return True
 
-    # СПИСОК ЗАДАЧ
+    # -----------------------------------------------------
+    # TASK LIST
+    # -----------------------------------------------------
 
     task_list_phrases = {
         "/tasks",
@@ -1408,7 +1942,9 @@ def try_handle_command(
 
         return True
 
-    # ЗАКРЫТИЕ ЗАДАЧИ
+    # -----------------------------------------------------
+    # COMPLETE TASK
+    # -----------------------------------------------------
 
     done_match = re.match(
         r"^(?:"
@@ -1435,20 +1971,20 @@ def try_handle_command(
         ):
             send_message(
                 chat_id,
-                f"Задачу #{task_id} "
-                "закрыла ✅"
+                f"Задачу #{task_id} закрыла ✅"
             )
 
         else:
             send_message(
                 chat_id,
-                f"Не нашла открытую "
-                f"задачу #{task_id}."
+                f"Не нашла открытую задачу #{task_id}."
             )
 
         return True
 
-    # ДОБАВЛЕНИЕ ЗАДАЧИ
+    # -----------------------------------------------------
+    # ADD TASK
+    # -----------------------------------------------------
 
     task_patterns = [
         r"^задача\s*[,:-]?\s+(.+)$",
@@ -1489,7 +2025,9 @@ def try_handle_command(
 
             return True
 
-    # ПОКАЗ ПАМЯТИ
+    # -----------------------------------------------------
+    # SHOW MEMORY
+    # -----------------------------------------------------
 
     memory_phrases = {
         "/memory",
@@ -1508,7 +2046,9 @@ def try_handle_command(
 
         return True
 
-    # УДАЛЕНИЕ ИЗ ПАМЯТИ
+    # -----------------------------------------------------
+    # DELETE MEMORY
+    # -----------------------------------------------------
 
     forget_match = re.match(
         r"^(?:"
@@ -1533,20 +2073,20 @@ def try_handle_command(
         ):
             send_message(
                 chat_id,
-                f"Удалила запись "
-                f"#{memory_id} из памяти."
+                f"Удалила запись #{memory_id} из памяти."
             )
 
         else:
             send_message(
                 chat_id,
-                f"Не нашла запись "
-                f"#{memory_id}."
+                f"Не нашла запись #{memory_id}."
             )
 
         return True
 
-    # СОХРАНЕНИЕ В ПАМЯТЬ
+    # -----------------------------------------------------
+    # ADD MEMORY
+    # -----------------------------------------------------
 
     memory_patterns = [
         r"^запомни\s*,?\s*что\s+(.+)$",
@@ -1579,8 +2119,7 @@ def try_handle_command(
             send_message(
                 chat_id,
                 "Запомнила 🧠\n\n"
-                f"#{memory_id}: "
-                f"{memory_text}"
+                f"#{memory_id}: {memory_text}"
             )
 
             return True
@@ -1598,7 +2137,7 @@ def main():
     print(
         "Masha 2.0 запущена. "
         "SQLite + OpenAI + "
-        "Yandex Calendar read-only."
+        "Yandex Calendar + smart review."
     )
 
     offset = None
@@ -1658,21 +2197,21 @@ def main():
                     repr(text)
                 )
 
-                # Сначала календарные команды
+                # Сначала календарь
                 if try_handle_calendar(
                     chat_id,
                     text
                 ):
                     continue
 
-                # Потом задачи и память
+                # Затем задачи и память
                 if try_handle_command(
                     chat_id,
                     text
                 ):
                     continue
 
-                # Обычный разговор с OpenAI
+                # Обычный разговор
                 send_message(
                     chat_id,
                     "Думаю..."
@@ -1712,8 +2251,7 @@ def main():
                         chat_id,
                         "Я дошла до OpenAI, "
                         "но получила ошибку API. "
-                        "Посмотри мой лог "
-                        "в Railway."
+                        "Посмотри лог в Railway."
                     )
 
                 except Exception as e:
@@ -1724,8 +2262,7 @@ def main():
 
                     send_message(
                         chat_id,
-                        "У меня возникла "
-                        "техническая ошибка "
+                        "У меня возникла техническая ошибка "
                         "при обращении к ИИ."
                     )
 
