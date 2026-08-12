@@ -113,6 +113,13 @@ ASSISTANT_INSTRUCTIONS = """
 - собери суть цепочки;
 - скажи, какое письмо вероятнее всего искала Маша.
 
+Если имя человека написано по-русски, а в письме латиницей,
+можно считать их одним человеком только если это подтверждается
+именем отправителя или адресом электронной почты.
+
+Не связывай человека с email только потому,
+что этот email оказался в той же цепочке переписки.
+
 КАК РАБОТАТЬ С МАШЕЙ
 
 - Отвечай по-русски.
@@ -139,8 +146,8 @@ ASSISTANT_INSTRUCTIONS = """
 Если поиск почты ничего не нашел:
 так и скажи.
 
-Не придумывай адресатов, вложения, решения
-или содержание писем.
+Не придумывай адресатов, вложения,
+решения или содержание писем.
 
 ФОРМАТ
 
@@ -155,17 +162,57 @@ Telegram получает обычный текст.
 # =========================================================
 
 def ensure_data_directory():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(
+        os.path.dirname(DB_PATH),
+        exist_ok=True
+    )
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30
+    )
     conn.row_factory = sqlite3.Row
     return conn
 
 
+def ensure_mail_contacts_schema(conn):
+    """
+    Старые версии бота создавали mail_contacts
+    без поля verified.
+
+    Добавляем его безопасно.
+
+    Все СТАРЫЕ связи получают verified=0,
+    то есть больше автоматически не используются.
+    """
+
+    columns = conn.execute(
+        "PRAGMA table_info(mail_contacts)"
+    ).fetchall()
+
+    column_names = {
+        row[1]
+        for row in columns
+    }
+
+    if "verified" not in column_names:
+        conn.execute("""
+            ALTER TABLE mail_contacts
+            ADD COLUMN verified INTEGER NOT NULL DEFAULT 0
+        """)
+
+    if "source" not in column_names:
+        conn.execute("""
+            ALTER TABLE mail_contacts
+            ADD COLUMN source TEXT DEFAULT 'legacy'
+        """)
+
+
 def init_db():
     ensure_data_directory()
+
     conn = get_db()
 
     conn.execute("""
@@ -203,9 +250,13 @@ def init_db():
             email TEXT NOT NULL,
             display_name TEXT,
             created_at TEXT NOT NULL,
+            verified INTEGER NOT NULL DEFAULT 0,
+            source TEXT DEFAULT 'auto',
             UNIQUE(chat_id, alias, email)
         )
     """)
+
+    ensure_mail_contacts_schema(conn)
 
     conn.commit()
     conn.close()
@@ -231,11 +282,14 @@ def add_task(chat_id, text):
         (
             chat_id,
             text.strip(),
-            datetime.now().isoformat(timespec="seconds")
+            datetime.now().isoformat(
+                timespec="seconds"
+            )
         )
     )
 
     task_id = cursor.lastrowid
+
     conn.commit()
     conn.close()
 
@@ -257,6 +311,7 @@ def get_open_tasks(chat_id):
     ).fetchall()
 
     conn.close()
+
     return rows
 
 
@@ -273,13 +328,16 @@ def complete_task(chat_id, task_id):
           AND status = 'open'
         """,
         (
-            datetime.now().isoformat(timespec="seconds"),
+            datetime.now().isoformat(
+                timespec="seconds"
+            ),
             chat_id,
             task_id
         )
     )
 
     changed = cursor.rowcount
+
     conn.commit()
     conn.close()
 
@@ -305,11 +363,14 @@ def add_memory(chat_id, text):
         (
             chat_id,
             text.strip(),
-            datetime.now().isoformat(timespec="seconds")
+            datetime.now().isoformat(
+                timespec="seconds"
+            )
         )
     )
 
     memory_id = cursor.lastrowid
+
     conn.commit()
     conn.close()
 
@@ -330,6 +391,7 @@ def get_memories(chat_id):
     ).fetchall()
 
     conn.close()
+
     return rows
 
 
@@ -349,84 +411,11 @@ def delete_memory(chat_id, memory_id):
     )
 
     changed = cursor.rowcount
+
     conn.commit()
     conn.close()
 
     return changed > 0
-
-
-# =========================================================
-# ПОЧТОВЫЕ КОНТАКТЫ
-# =========================================================
-
-def remember_mail_contact(
-    chat_id,
-    alias,
-    email_address,
-    display_name=""
-):
-    alias = alias.strip().lower()
-    email_address = email_address.strip().lower()
-
-    if not alias or not email_address:
-        return
-
-    conn = get_db()
-
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO mail_contacts (
-            chat_id,
-            alias,
-            email,
-            display_name,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            chat_id,
-            alias,
-            email_address,
-            display_name,
-            datetime.now().isoformat(timespec="seconds")
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def get_mail_contact_aliases(chat_id, query):
-    query = query.strip().lower()
-
-    conn = get_db()
-
-    rows = conn.execute(
-        """
-        SELECT alias, email, display_name
-        FROM mail_contacts
-        WHERE chat_id = ?
-        """,
-        (chat_id,)
-    ).fetchall()
-
-    conn.close()
-
-    result = []
-
-    for row in rows:
-        if (
-            row["alias"] in query
-            or query in row["alias"]
-        ):
-            result.append({
-                "alias": row["alias"],
-                "email": row["email"],
-                "display_name": row["display_name"] or ""
-            })
-
-    return result
 
 
 # =========================================================
@@ -448,12 +437,17 @@ def get_previous_response_id(chat_id):
     conn.close()
 
     if row:
-        return row["previous_response_id"]
+        return row[
+            "previous_response_id"
+        ]
 
     return None
 
 
-def save_previous_response_id(chat_id, response_id):
+def save_previous_response_id(
+    chat_id,
+    response_id
+):
     conn = get_db()
 
     conn.execute(
@@ -466,7 +460,8 @@ def save_previous_response_id(chat_id, response_id):
 
         ON CONFLICT(chat_id)
         DO UPDATE SET
-            previous_response_id = excluded.previous_response_id
+            previous_response_id =
+            excluded.previous_response_id
         """,
         (
             chat_id,
@@ -499,11 +494,16 @@ def clear_previous_response_id(chat_id):
 
 def send_message(chat_id, text):
     text = str(text or "")
+
     max_length = 4000
 
     parts = [
         text[i:i + max_length]
-        for i in range(0, len(text), max_length)
+        for i in range(
+            0,
+            len(text),
+            max_length
+        )
     ]
 
     if not parts:
@@ -540,6 +540,7 @@ def get_yandex_calendars():
 
     try:
         return principal.get_calendars()
+
     except AttributeError:
         return principal.calendars()
 
@@ -549,9 +550,14 @@ def normalize_calendar_datetime(value):
         dt = value
 
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=CALENDAR_TZ)
+            dt = dt.replace(
+                tzinfo=CALENDAR_TZ
+            )
+
         else:
-            dt = dt.astimezone(CALENDAR_TZ)
+            dt = dt.astimezone(
+                CALENDAR_TZ
+            )
 
         return dt, False
 
@@ -569,20 +575,31 @@ def normalize_calendar_datetime(value):
 def extract_attendees(component):
     attendees = []
 
-    raw_attendees = component.get("ATTENDEE")
+    raw_attendees = component.get(
+        "ATTENDEE"
+    )
 
     if not raw_attendees:
         return attendees
 
-    if not isinstance(raw_attendees, list):
-        raw_attendees = [raw_attendees]
+    if not isinstance(
+        raw_attendees,
+        list
+    ):
+        raw_attendees = [
+            raw_attendees
+        ]
 
     for attendee in raw_attendees:
         name = ""
         participation = ""
 
         try:
-            name = attendee.params.get("CN", "")
+            name = attendee.params.get(
+                "CN",
+                ""
+            )
+
         except Exception:
             pass
 
@@ -591,13 +608,16 @@ def extract_attendees(component):
                 "PARTSTAT",
                 ""
             )
+
         except Exception:
             pass
 
         attendees.append({
             "name": str(name),
             "value": str(attendee),
-            "partstat": str(participation)
+            "partstat": str(
+                participation
+            )
         })
 
     return attendees
@@ -610,38 +630,60 @@ def extract_event_from_ical(
     if not ical_data:
         return []
 
-    if isinstance(ical_data, str):
-        ical_data = ical_data.encode("utf-8")
+    if isinstance(
+        ical_data,
+        str
+    ):
+        ical_data = ical_data.encode(
+            "utf-8"
+        )
 
-    parsed = Calendar.from_ical(ical_data)
+    parsed = Calendar.from_ical(
+        ical_data
+    )
+
     result = []
 
     for component in parsed.walk():
         if component.name != "VEVENT":
             continue
 
-        dtstart_property = component.get("DTSTART")
+        dtstart_property = component.get(
+            "DTSTART"
+        )
 
         if not dtstart_property:
             continue
 
-        start, all_day = normalize_calendar_datetime(
-            dtstart_property.dt
+        start, all_day = (
+            normalize_calendar_datetime(
+                dtstart_property.dt
+            )
         )
 
         if start is None:
             continue
 
         end = None
-        dtend_property = component.get("DTEND")
+
+        dtend_property = component.get(
+            "DTEND"
+        )
 
         if dtend_property:
-            end, _ = normalize_calendar_datetime(
-                dtend_property.dt
+            end, _ = (
+                normalize_calendar_datetime(
+                    dtend_property.dt
+                )
             )
 
         result.append({
-            "uid": str(component.get("UID", "")),
+            "uid": str(
+                component.get(
+                    "UID",
+                    ""
+                )
+            ),
             "summary": str(
                 component.get(
                     "SUMMARY",
@@ -670,19 +712,31 @@ def extract_event_from_ical(
                 )
             ),
             "calendar": calendar_name,
-            "attendees": extract_attendees(component)
+            "attendees": (
+                extract_attendees(
+                    component
+                )
+            )
         })
 
     return result
 
 
-def get_calendar_events(start_dt, end_dt):
+def get_calendar_events(
+    start_dt,
+    end_dt
+):
     calendars = get_yandex_calendars()
+
     collected = []
 
     for calendar in calendars:
         calendar_name = (
-            getattr(calendar, "name", None)
+            getattr(
+                calendar,
+                "name",
+                None
+            )
             or "Календарь"
         )
 
@@ -692,6 +746,7 @@ def get_calendar_events(start_dt, end_dt):
                 end=end_dt,
                 expand=True
             )
+
         except TypeError:
             events = calendar.date_search(
                 start_dt,
@@ -707,6 +762,7 @@ def get_calendar_events(start_dt, end_dt):
                         calendar_name
                     )
                 )
+
             except Exception as e:
                 print(
                     "Calendar parse error:",
@@ -729,7 +785,9 @@ def get_calendar_events(start_dt, end_dt):
         )
 
         key = (
-            event["summary"].strip().lower(),
+            event["summary"]
+            .strip()
+            .lower(),
             start_key,
             end_key
         )
@@ -749,7 +807,9 @@ def get_calendar_events(start_dt, end_dt):
                 not existing[field]
                 and event[field]
             ):
-                existing[field] = event[field]
+                existing[field] = (
+                    event[field]
+                )
 
         if (
             not existing["attendees"]
@@ -759,8 +819,13 @@ def get_calendar_events(start_dt, end_dt):
                 event["attendees"]
             )
 
-    result = list(unique.values())
-    result.sort(key=lambda item: item["start"])
+    result = list(
+        unique.values()
+    )
+
+    result.sort(
+        key=lambda item: item["start"]
+    )
 
     return result
 
@@ -779,7 +844,9 @@ def format_event(event):
         )
 
     else:
-        time_text = start.strftime("%H:%M")
+        time_text = start.strftime(
+            "%H:%M"
+        )
 
     text = (
         f"{time_text} — "
@@ -787,12 +854,17 @@ def format_event(event):
     )
 
     if event["location"]:
-        text += f"\n📍 {event['location']}"
+        text += (
+            f"\n📍 {event['location']}"
+        )
 
     return text
 
 
-def format_calendar_day(target_date, title):
+def format_calendar_day(
+    target_date,
+    title
+):
     start_dt = datetime(
         target_date.year,
         target_date.month,
@@ -821,7 +893,10 @@ def format_calendar_day(target_date, title):
     )
 
 
-def format_calendar_period(start_date, days):
+def format_calendar_period(
+    start_date,
+    days
+):
     start_dt = datetime(
         start_date.year,
         start_date.month,
@@ -845,7 +920,9 @@ def format_calendar_period(start_date, days):
     for event in events:
         event_date = (
             event["start"]
-            .astimezone(CALENDAR_TZ)
+            .astimezone(
+                CALENDAR_TZ
+            )
             .date()
         )
 
@@ -866,21 +943,32 @@ def format_calendar_period(start_date, days):
 
     lines = []
 
-    for event_date in sorted(grouped.keys()):
+    for event_date in sorted(
+        grouped.keys()
+    ):
         lines.append(
             f"{weekday_names[event_date.weekday()]}, "
             f"{event_date.strftime('%d.%m')}"
         )
 
-        for event in grouped[event_date]:
-            lines.append(format_event(event))
+        for event in grouped[
+            event_date
+        ]:
+            lines.append(
+                format_event(event)
+            )
 
         lines.append("")
 
-    return "\n".join(lines).strip()
+    return "\n".join(
+        lines
+    ).strip()
 
 
-def calendar_context(start_date, days=1):
+def calendar_context(
+    start_date,
+    days=1
+):
     start_dt = datetime(
         start_date.year,
         start_date.month,
@@ -893,10 +981,14 @@ def calendar_context(start_date, days=1):
         start_dt + timedelta(days=days)
     )
 
-    lines = ["КАЛЕНДАРЬ:"]
+    lines = [
+        "КАЛЕНДАРЬ:"
+    ]
 
     if not events:
-        lines.append("Событий нет.")
+        lines.append(
+            "Событий нет."
+        )
         return "\n".join(lines)
 
     for index, event in enumerate(
@@ -908,7 +1000,9 @@ def calendar_context(start_date, days=1):
 
         if event["all_day"]:
             when = (
-                start.strftime("%d.%m.%Y")
+                start.strftime(
+                    "%d.%m.%Y"
+                )
                 + " весь день"
             )
 
@@ -918,7 +1012,9 @@ def calendar_context(start_date, days=1):
                     "%d.%m.%Y %H:%M"
                 )
                 + "–"
-                + end.strftime("%H:%M")
+                + end.strftime(
+                    "%H:%M"
+                )
             )
 
         else:
@@ -929,8 +1025,14 @@ def calendar_context(start_date, days=1):
         lines.extend([
             "",
             f"Событие {index}",
-            "Название: " + event["summary"],
-            "Время: " + when,
+            (
+                "Название: "
+                + event["summary"]
+            ),
+            (
+                "Время: "
+                + when
+            ),
             (
                 "Место/адрес: "
                 + (
@@ -940,9 +1042,10 @@ def calendar_context(start_date, days=1):
             )
         ])
 
-        description = event[
-            "description"
-        ].strip()
+        description = (
+            event["description"]
+            .strip()
+        )
 
         if len(description) > 2500:
             description = (
@@ -990,9 +1093,12 @@ def decode_mime_header(value):
     try:
         return str(
             make_header(
-                decode_header(value)
+                decode_header(
+                    value
+                )
             )
         )
+
     except Exception:
         return str(value)
 
@@ -1001,7 +1107,8 @@ def get_mail_connection():
     client = IMAPClient(
         YANDEX_IMAP_HOST,
         port=YANDEX_IMAP_PORT,
-        ssl=True
+        ssl=True,
+        timeout=30
     )
 
     client.login(
@@ -1028,7 +1135,9 @@ def clean_html_text(value):
         value
     )
 
-    value = html.unescape(value)
+    value = html.unescape(
+        value
+    )
 
     value = re.sub(
         r"[ \t]+",
@@ -1090,37 +1199,60 @@ def extract_mail_body(message):
                 continue
 
             if content_type == "text/plain":
-                value = decode_part_payload(part)
+                value = (
+                    decode_part_payload(
+                        part
+                    )
+                )
 
                 if value:
-                    plain_parts.append(value)
+                    plain_parts.append(
+                        value
+                    )
 
             elif content_type == "text/html":
-                value = decode_part_payload(part)
+                value = (
+                    decode_part_payload(
+                        part
+                    )
+                )
 
                 if value:
                     html_parts.append(
-                        clean_html_text(value)
+                        clean_html_text(
+                            value
+                        )
                     )
 
     else:
-        value = decode_part_payload(message)
+        value = decode_part_payload(
+            message
+        )
 
         if (
             message.get_content_type()
             == "text/html"
         ):
             html_parts.append(
-                clean_html_text(value)
+                clean_html_text(
+                    value
+                )
             )
+
         else:
-            plain_parts.append(value)
+            plain_parts.append(
+                value
+            )
 
     if plain_parts:
-        body = "\n".join(plain_parts)
+        body = "\n".join(
+            plain_parts
+        )
 
     elif html_parts:
-        body = "\n".join(html_parts)
+        body = "\n".join(
+            html_parts
+        )
 
     else:
         body = ""
@@ -1144,7 +1276,9 @@ def get_attachment_names(message):
 
         if filename:
             names.append(
-                decode_mime_header(filename)
+                decode_mime_header(
+                    filename
+                )
             )
 
     return names
@@ -1155,7 +1289,9 @@ def parse_email_date(value):
         return None
 
     try:
-        dt = parsedate_to_datetime(value)
+        dt = parsedate_to_datetime(
+            value
+        )
 
         if dt is None:
             return None
@@ -1164,6 +1300,7 @@ def parse_email_date(value):
             dt = dt.replace(
                 tzinfo=CALENDAR_TZ
             )
+
         else:
             dt = dt.astimezone(
                 CALENDAR_TZ
@@ -1186,7 +1323,9 @@ def parse_full_email(
 
     return {
         "uid": uid,
-        "folder": str(folder_name),
+        "folder": str(
+            folder_name
+        ),
         "message_id": str(
             message.get(
                 "Message-ID",
@@ -1223,15 +1362,19 @@ def parse_full_email(
                 ""
             )
         ),
-        "body": extract_mail_body(message),
+        "body": extract_mail_body(
+            message
+        ),
         "attachments": (
-            get_attachment_names(message)
+            get_attachment_names(
+                message
+            )
         )
     }
 
 
 # =========================================================
-# БЫСТРЫЙ ПОИСК ПОЧТЫ V3
+# НОРМАЛИЗАЦИЯ ПОИСКА
 # =========================================================
 
 RUS_TO_LAT = {
@@ -1313,7 +1456,10 @@ SKIP_MAIL_FOLDERS = {
 
 def transliterate_ru(value):
     return "".join(
-        RUS_TO_LAT.get(char, char)
+        RUS_TO_LAT.get(
+            char,
+            char
+        )
         for char in value.lower()
     )
 
@@ -1322,7 +1468,9 @@ def normalize_search_text(value):
     return re.sub(
         r"\s+",
         " ",
-        value.lower().replace(
+        str(value)
+        .lower()
+        .replace(
             "ё",
             "е"
         )
@@ -1341,18 +1489,458 @@ def extract_email_addresses(value):
     )
 
 
+def russian_stem(word):
+    """
+    Эльдара -> эльдар
+    Эльдаром -> эльдар
+    Эльдару -> эльдар
+    """
+
+    word = normalize_search_text(
+        word
+    )
+
+    candidates = {
+        word
+    }
+
+    endings = [
+        "ами",
+        "ями",
+        "ого",
+        "ему",
+        "ому",
+        "ом",
+        "ем",
+        "ах",
+        "ях",
+        "ов",
+        "ев",
+        "а",
+        "я",
+        "у",
+        "ю",
+        "е",
+        "ы",
+        "и"
+    ]
+
+    if len(word) >= 5:
+        for ending in endings:
+            if (
+                word.endswith(
+                    ending
+                )
+                and (
+                    len(word)
+                    - len(ending)
+                ) >= 4
+            ):
+                candidates.add(
+                    word[
+                        :-len(ending)
+                    ]
+                )
+
+    return min(
+        candidates,
+        key=len
+    )
+
+
+def extract_query_alias(query):
+    """
+    Из:
+    "Эльдара"
+    -> "эльдар"
+
+    Из:
+    "переписку с Эльдаром"
+    -> "эльдар"
+    """
+
+    words = re.findall(
+        r"[а-яёa-z]+",
+        normalize_search_text(
+            query
+        ),
+        flags=re.IGNORECASE
+    )
+
+    useful = [
+        word
+        for word in words
+        if (
+            word not in MAIL_STOP_WORDS
+            and len(word) >= 4
+        )
+    ]
+
+    if not useful:
+        return ""
+
+    # При запросе с несколькими словами
+    # для автоконтакта берём первое содержательное слово.
+    return russian_stem(
+        useful[0]
+    )
+
+
+# =========================================================
+# БЕЗОПАСНЫЙ КЭШ КОНТАКТОВ
+# =========================================================
+
+def save_verified_mail_contact(
+    chat_id,
+    alias,
+    email_address,
+    display_name
+):
+    alias = normalize_search_text(
+        alias
+    )
+
+    email_address = (
+        email_address
+        .strip()
+        .lower()
+    )
+
+    if not alias or not email_address:
+        return
+
+    conn = get_db()
+
+    conn.execute(
+        """
+        INSERT INTO mail_contacts (
+            chat_id,
+            alias,
+            email,
+            display_name,
+            created_at,
+            verified,
+            source
+        )
+        VALUES (?, ?, ?, ?, ?, 1, 'matched-name')
+
+        ON CONFLICT(chat_id, alias, email)
+        DO UPDATE SET
+            display_name = excluded.display_name,
+            verified = 1,
+            source = 'matched-name'
+        """,
+        (
+            chat_id,
+            alias,
+            email_address,
+            display_name,
+            datetime.now().isoformat(
+                timespec="seconds"
+            )
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    print(
+        "Verified mail contact saved:",
+        repr(alias),
+        "->",
+        repr(email_address)
+    )
+
+
+def get_verified_mail_contacts(
+    chat_id,
+    query
+):
+    alias = extract_query_alias(
+        query
+    )
+
+    if not alias:
+        return []
+
+    alias_lat = transliterate_ru(
+        alias
+    )
+
+    conn = get_db()
+
+    rows = conn.execute(
+        """
+        SELECT alias, email, display_name
+        FROM mail_contacts
+        WHERE chat_id = ?
+          AND verified = 1
+        """,
+        (chat_id,)
+    ).fetchall()
+
+    conn.close()
+
+    result = []
+
+    for row in rows:
+        saved_alias = (
+            normalize_search_text(
+                row["alias"]
+            )
+        )
+
+        saved_lat = transliterate_ru(
+            saved_alias
+        )
+
+        if (
+            saved_alias == alias
+            or saved_lat == alias_lat
+        ):
+            result.append({
+                "alias": row["alias"],
+                "email": row["email"],
+                "display_name": (
+                    row["display_name"]
+                    or ""
+                )
+            })
+
+    return result
+
+
+def forget_mail_contact(
+    chat_id,
+    query
+):
+    alias = extract_query_alias(
+        query
+    )
+
+    if not alias:
+        alias = normalize_search_text(
+            query
+        )
+
+    alias_lat = transliterate_ru(
+        alias
+    )
+
+    conn = get_db()
+
+    rows = conn.execute(
+        """
+        SELECT id, alias
+        FROM mail_contacts
+        WHERE chat_id = ?
+        """,
+        (chat_id,)
+    ).fetchall()
+
+    ids_to_delete = []
+
+    for row in rows:
+        saved_alias = (
+            normalize_search_text(
+                row["alias"]
+            )
+        )
+
+        if (
+            saved_alias == alias
+            or transliterate_ru(
+                saved_alias
+            ) == alias_lat
+        ):
+            ids_to_delete.append(
+                row["id"]
+            )
+
+    if ids_to_delete:
+        placeholders = ",".join(
+            "?"
+            for _ in ids_to_delete
+        )
+
+        conn.execute(
+            f"""
+            DELETE FROM mail_contacts
+            WHERE id IN ({placeholders})
+            """,
+            ids_to_delete
+        )
+
+    conn.commit()
+    conn.close()
+
+    return len(ids_to_delete)
+
+
+def list_verified_mail_contacts(
+    chat_id
+):
+    conn = get_db()
+
+    rows = conn.execute(
+        """
+        SELECT alias, email, display_name
+        FROM mail_contacts
+        WHERE chat_id = ?
+          AND verified = 1
+        ORDER BY alias, email
+        """,
+        (chat_id,)
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def contact_candidate_matches_alias(
+    alias,
+    display_value,
+    email_address
+):
+    """
+    Самая важная защита.
+
+    Эльдар может запомниться как
+    eldar.gincharadze@ddb.ru,
+    потому что:
+
+    alias = эльдар
+    translit = eldar
+
+    и "Eldar" реально присутствует
+    либо в имени, либо в local-part email.
+
+    А ekulikova@... не пройдёт.
+    """
+
+    if not alias:
+        return False
+
+    alias = normalize_search_text(
+        alias
+    )
+
+    alias_lat = transliterate_ru(
+        alias
+    )
+
+    display_n = normalize_search_text(
+        display_value
+    )
+
+    display_lat = transliterate_ru(
+        display_n
+    )
+
+    local_part = (
+        email_address
+        .split("@", 1)[0]
+        .lower()
+    )
+
+    # Русское имя напрямую.
+    if alias in display_n:
+        return True
+
+    # Транслитерация имени.
+    if (
+        alias_lat
+        and alias_lat in display_lat
+    ):
+        return True
+
+    # Имя присутствует в email:
+    # eldar.gincharadze
+    if (
+        alias_lat
+        and alias_lat in local_part
+    ):
+        return True
+
+    return False
+
+
+def remember_safe_contacts_from_messages(
+    chat_id,
+    query,
+    messages
+):
+    alias = extract_query_alias(
+        query
+    )
+
+    if not alias:
+        return
+
+    for item in messages:
+        address_sources = [
+            item.get(
+                "from",
+                ""
+            ),
+            item.get(
+                "to",
+                ""
+            )
+        ]
+
+        for display_value in address_sources:
+            addresses = (
+                extract_email_addresses(
+                    display_value
+                )
+            )
+
+            for address in addresses:
+                if (
+                    address.lower()
+                    == YANDEX_MAIL_LOGIN.lower()
+                ):
+                    continue
+
+                if not contact_candidate_matches_alias(
+                    alias,
+                    display_value,
+                    address
+                ):
+                    continue
+
+                save_verified_mail_contact(
+                    chat_id,
+                    alias,
+                    address,
+                    display_value
+                )
+
+
+# =========================================================
+# ПАПКИ ПОЧТЫ
+# =========================================================
+
 def get_useful_mail_folders(client):
     all_folders = []
 
-    for flags, delimiter, folder_name in (
-        client.list_folders()
-    ):
+    for (
+        flags,
+        delimiter,
+        folder_name
+    ) in client.list_folders():
+
         flags_text = {
             (
                 flag.decode(
                     errors="ignore"
                 )
-                if isinstance(flag, bytes)
+                if isinstance(
+                    flag,
+                    bytes
+                )
                 else str(flag)
             ).lower()
             for flag in flags
@@ -1371,10 +1959,14 @@ def get_useful_mail_folders(client):
         ):
             continue
 
-        all_folders.append(folder_name)
+        all_folders.append(
+            folder_name
+        )
 
     def folder_priority(folder):
-        value = str(folder).lower()
+        value = str(
+            folder
+        ).lower()
 
         if value == "inbox":
             return 0
@@ -1394,6 +1986,10 @@ def get_useful_mail_folders(client):
     return all_folders
 
 
+# =========================================================
+# ПОИСКОВЫЕ ТЕРМЫ
+# =========================================================
+
 def build_fast_search_terms(
     chat_id,
     query
@@ -1402,7 +1998,8 @@ def build_fast_search_terms(
         query
     )
 
-    # Сначала точный email, если он есть.
+    # Если Маша сама написала email —
+    # это самый точный вариант.
     emails = extract_email_addresses(
         query_n
     )
@@ -1412,16 +2009,28 @@ def build_fast_search_terms(
             emails[0].lower()
         ]
 
-    # Если контакт уже найден раньше —
-    # используем email и ничего больше.
-    known_contacts = get_mail_contact_aliases(
-        chat_id,
-        query_n
+    # Используем ТОЛЬКО проверенный кэш.
+    known_contacts = (
+        get_verified_mail_contacts(
+            chat_id,
+            query
+        )
     )
 
     if known_contacts:
+        email_address = (
+            known_contacts[0][
+                "email"
+            ]
+        )
+
+        print(
+            "Using VERIFIED cached contact:",
+            email_address
+        )
+
         return [
-            known_contacts[0]["email"]
+            email_address
         ]
 
     words = re.findall(
@@ -1439,95 +2048,49 @@ def build_fast_search_terms(
         ):
             continue
 
-        useful_words.append(word)
+        useful_words.append(
+            word
+        )
 
     if not useful_words:
         return []
 
-    # Берём только самое значимое слово.
     main_word = max(
         useful_words,
         key=len
     )
 
-    terms = []
-
-    normalized_word = (
+    best_ru = russian_stem(
         main_word
-        .replace("ё", "е")
     )
 
-    # Убираем частые русские окончания.
-    stems = {
-        normalized_word
-    }
-
-    for ending in [
-        "ами",
-        "ями",
-        "ого",
-        "ему",
-        "ому",
-        "ом",
-        "ем",
-        "ах",
-        "ях",
-        "ов",
-        "ев",
-        "а",
-        "я",
-        "у",
-        "ю",
-        "е",
-        "ы",
-        "и"
-    ]:
-        if (
-            normalized_word.endswith(
-                ending
-            )
-            and (
-                len(normalized_word)
-                - len(ending)
-            ) >= 4
-        ):
-            stems.add(
-                normalized_word[
-                    :-len(ending)
-                ]
-            )
-
-    # Предпочитаем короткий корень:
-    # "Эльдара" -> "эльдар".
-    best_ru = min(
-        stems,
-        key=len
-    )
-
-    terms.append(best_ru)
+    terms = [
+        best_ru
+    ]
 
     translit = transliterate_ru(
         best_ru
     )
 
-    if translit != best_ru:
-        terms.append(translit)
+    if (
+        translit
+        and translit != best_ru
+    ):
+        terms.append(
+            translit
+        )
 
-    # Максимум два терма.
     return terms[:2]
 
+
+# =========================================================
+# СЕРВЕРНЫЙ IMAP SEARCH
+# =========================================================
 
 def search_headers_only(
     client,
     terms
 ):
-    """
-    Первый проход:
-    FROM + TO + SUBJECT.
-
-    Никакого TEXT.
-    """
-
     found = set()
 
     for term in terms:
@@ -1538,11 +2101,16 @@ def search_headers_only(
         ]:
             try:
                 uids = client.search(
-                    [field, term],
+                    [
+                        field,
+                        term
+                    ],
                     charset="UTF-8"
                 )
 
-                found.update(uids)
+                found.update(
+                    uids
+                )
 
             except Exception as e:
                 print(
@@ -1552,28 +2120,30 @@ def search_headers_only(
                     repr(e)
                 )
 
-    return list(found)
+    return list(
+        found
+    )
 
 
 def search_text_fallback(
     client,
     terms
 ):
-    """
-    Второй проход только если
-    по заголовкам вообще ничего не найдено.
-    """
-
     found = set()
 
     for term in terms:
         try:
             uids = client.search(
-                ["TEXT", term],
+                [
+                    "TEXT",
+                    term
+                ],
                 charset="UTF-8"
             )
 
-            found.update(uids)
+            found.update(
+                uids
+            )
 
         except Exception as e:
             print(
@@ -1582,7 +2152,9 @@ def search_text_fallback(
                 repr(e)
             )
 
-    return list(found)
+    return list(
+        found
+    )
 
 
 def fetch_messages(
@@ -1601,20 +2173,28 @@ def fetch_messages(
 
     fetched = client.fetch(
         selected,
-        ["RFC822"]
+        [
+            "RFC822"
+        ]
     )
 
     messages = []
 
     for uid in selected:
-        values = fetched.get(uid)
+        values = fetched.get(
+            uid
+        )
 
         if not values:
             continue
 
         raw_email = (
-            values.get(b"RFC822")
-            or values.get("RFC822")
+            values.get(
+                b"RFC822"
+            )
+            or values.get(
+                "RFC822"
+            )
         )
 
         if not raw_email:
@@ -1675,72 +2255,24 @@ def relevance_score(
 
         if term_score > 0:
             score += term_score
-            matched.append(term)
+            matched.append(
+                term
+            )
 
-    item["matched_terms"] = sorted(
-        set(matched)
+    item[
+        "matched_terms"
+    ] = sorted(
+        set(
+            matched
+        )
     )
 
     return score
 
 
-def remember_contacts_from_messages(
-    chat_id,
-    query,
-    messages
-):
-    words = [
-        word
-        for word in re.findall(
-            r"[а-яёa-z]+",
-            normalize_search_text(query),
-            flags=re.IGNORECASE
-        )
-        if (
-            word not in MAIL_STOP_WORDS
-            and len(word) >= 4
-        )
-    ]
-
-    if not words:
-        return
-
-    alias = min(
-        words,
-        key=len
-    )
-
-    for item in messages:
-        addresses = (
-            extract_email_addresses(
-                item["from"]
-            )
-            + extract_email_addresses(
-                item["to"]
-            )
-        )
-
-        for address in addresses:
-            if (
-                address.lower()
-                == YANDEX_MAIL_LOGIN.lower()
-            ):
-                continue
-
-            display_name = (
-                item["from"]
-                if address.lower()
-                in item["from"].lower()
-                else item["to"]
-            )
-
-            remember_mail_contact(
-                chat_id,
-                alias,
-                address,
-                display_name
-            )
-
+# =========================================================
+# БЫСТРЫЙ ПОИСК V4
+# =========================================================
 
 def search_mail_fast(
     chat_id,
@@ -1761,6 +2293,7 @@ def search_mail_fast(
         return []
 
     client = get_mail_connection()
+
     all_results = []
 
     try:
@@ -1773,10 +2306,10 @@ def search_mail_fast(
             folders
         )
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # ПРОХОД 1:
-        # ТОЛЬКО FROM / TO / SUBJECT
-        # -------------------------------------------------
+        # FROM / TO / SUBJECT
+        # ---------------------------------------------
 
         for folder_name in folders:
             folder_started = time.time()
@@ -1787,9 +2320,11 @@ def search_mail_fast(
                     readonly=True
                 )
 
-                uids = search_headers_only(
-                    client,
-                    terms
+                uids = (
+                    search_headers_only(
+                        client,
+                        terms
+                    )
                 )
 
                 elapsed = (
@@ -1799,11 +2334,16 @@ def search_mail_fast(
 
                 print(
                     "Header search folder:",
-                    repr(folder_name),
+                    repr(
+                        folder_name
+                    ),
                     "uids:",
                     len(uids),
                     "time:",
-                    round(elapsed, 2),
+                    round(
+                        elapsed,
+                        2
+                    ),
                     "sec"
                 )
 
@@ -1833,14 +2373,16 @@ def search_mail_fast(
             except Exception as e:
                 print(
                     "Folder header search error:",
-                    repr(folder_name),
+                    repr(
+                        folder_name
+                    ),
                     repr(e)
                 )
 
-        # -------------------------------------------------
-        # ПРОХОД 2:
-        # TEXT ТОЛЬКО ЕСЛИ НИЧЕГО НЕ НАШЛИ
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # FALLBACK ПО ТЕКСТУ
+        # только если по заголовкам вообще 0
+        # ---------------------------------------------
 
         if not all_results:
             print(
@@ -1857,9 +2399,11 @@ def search_mail_fast(
                         readonly=True
                     )
 
-                    uids = search_text_fallback(
-                        client,
-                        terms
+                    uids = (
+                        search_text_fallback(
+                            client,
+                            terms
+                        )
                     )
 
                     elapsed = (
@@ -1869,22 +2413,29 @@ def search_mail_fast(
 
                     print(
                         "TEXT search folder:",
-                        repr(folder_name),
+                        repr(
+                            folder_name
+                        ),
                         "uids:",
                         len(uids),
                         "time:",
-                        round(elapsed, 2),
+                        round(
+                            elapsed,
+                            2
+                        ),
                         "sec"
                     )
 
                     if not uids:
                         continue
 
-                    messages = fetch_messages(
-                        client,
-                        folder_name,
-                        uids,
-                        max_count=25
+                    messages = (
+                        fetch_messages(
+                            client,
+                            folder_name,
+                            uids,
+                            max_count=25
+                        )
                     )
 
                     for item in messages:
@@ -1895,7 +2446,10 @@ def search_mail_fast(
                             )
                         )
 
-                        if item["score"] > 0:
+                        if (
+                            item["score"]
+                            > 0
+                        ):
                             all_results.append(
                                 item
                             )
@@ -1903,13 +2457,15 @@ def search_mail_fast(
                 except Exception as e:
                     print(
                         "Folder TEXT search error:",
-                        repr(folder_name),
+                        repr(
+                            folder_name
+                        ),
                         repr(e)
                     )
 
-        # -------------------------------------------------
-        # УБИРАЕМ ДУБЛИ
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # ДЕДУПЛИКАЦИЯ
+        # ---------------------------------------------
 
         unique = {}
 
@@ -1922,7 +2478,9 @@ def search_mail_fast(
                 )
             )
 
-            existing = unique.get(key)
+            existing = unique.get(
+                key
+            )
 
             if (
                 existing is None
@@ -1939,7 +2497,9 @@ def search_mail_fast(
             key=lambda item: (
                 item["score"],
                 (
-                    item["date"].timestamp()
+                    item[
+                        "date"
+                    ].timestamp()
                     if item["date"]
                     else 0
                 )
@@ -1951,8 +2511,11 @@ def search_mail_fast(
             :result_limit
         ]
 
+        # ВАЖНО:
+        # теперь сохраняем только реально
+        # подтверждённые совпадения имени/email.
         if results:
-            remember_contacts_from_messages(
+            remember_safe_contacts_from_messages(
                 chat_id,
                 query,
                 results
@@ -1963,11 +2526,18 @@ def search_mail_fast(
     finally:
         try:
             client.logout()
+
         except Exception:
             pass
 
 
-def get_recent_mail(limit=10):
+# =========================================================
+# ПОСЛЕДНИЕ ПИСЬМА
+# =========================================================
+
+def get_recent_mail(
+    limit=10
+):
     client = get_mail_connection()
 
     try:
@@ -1976,7 +2546,11 @@ def get_recent_mail(limit=10):
             readonly=True
         )
 
-        uids = client.search(["ALL"])
+        uids = client.search(
+            [
+                "ALL"
+            ]
+        )
 
         if not uids:
             return []
@@ -1987,20 +2561,28 @@ def get_recent_mail(limit=10):
 
         fetched = client.fetch(
             selected,
-            ["RFC822"]
+            [
+                "RFC822"
+            ]
         )
 
         result = []
 
         for uid in selected:
-            values = fetched.get(uid)
+            values = fetched.get(
+                uid
+            )
 
             if not values:
                 continue
 
             raw_email = (
-                values.get(b"RFC822")
-                or values.get("RFC822")
+                values.get(
+                    b"RFC822"
+                )
+                or values.get(
+                    "RFC822"
+                )
             )
 
             if raw_email:
@@ -2017,13 +2599,20 @@ def get_recent_mail(limit=10):
     finally:
         try:
             client.logout()
+
         except Exception:
             pass
 
 
+# =========================================================
+# ФОРМАТИРОВАНИЕ ПОЧТЫ
+# =========================================================
+
 def format_mail_date(dt):
     if not dt:
-        return "дата неизвестна"
+        return (
+            "дата неизвестна"
+        )
 
     return dt.strftime(
         "%d.%m.%Y %H:%M"
@@ -2040,7 +2629,9 @@ def format_mail_list(
             "Ничего не нашла."
         )
 
-    lines = [title]
+    lines = [
+        title
+    ]
 
     for index, item in enumerate(
         messages,
@@ -2066,25 +2657,39 @@ def format_mail_list(
             )
         ])
 
-        if item.get("attachments"):
+        if item.get(
+            "attachments"
+        ):
             lines.append(
                 "Вложения: "
                 + ", ".join(
-                    item["attachments"]
+                    item[
+                        "attachments"
+                    ]
                 )
             )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
-def mail_context(messages):
-    lines = ["ПОЧТА:"]
+def mail_context(
+    messages
+):
+    lines = [
+        "ПОЧТА:"
+    ]
 
     if not messages:
         lines.append(
-            "Подходящих писем не найдено."
+            "Подходящих писем "
+            "не найдено."
         )
-        return "\n".join(lines)
+
+        return "\n".join(
+            lines
+        )
 
     ordered = sorted(
         messages,
@@ -2118,26 +2723,44 @@ def mail_context(messages):
                     )
                 )
             ),
-            "От: " + item["from"],
-            "Кому: " + item["to"],
-            "Тема: " + item["subject"]
+            (
+                "От: "
+                + item["from"]
+            ),
+            (
+                "Кому: "
+                + item["to"]
+            ),
+            (
+                "Тема: "
+                + item["subject"]
+            )
         ])
 
-        if item.get("matched_terms"):
+        if item.get(
+            "matched_terms"
+        ):
             lines.append(
                 "Совпало при поиске: "
                 + ", ".join(
-                    item["matched_terms"]
+                    item[
+                        "matched_terms"
+                    ]
                 )
             )
 
-        if item["attachments"]:
+        if item[
+            "attachments"
+        ]:
             lines.append(
                 "Вложения: "
                 + ", ".join(
-                    item["attachments"]
+                    item[
+                        "attachments"
+                    ]
                 )
             )
+
         else:
             lines.append(
                 "Вложения: нет"
@@ -2151,16 +2774,25 @@ def mail_context(messages):
             )
         )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # =========================================================
-# КОНТЕКСТ ДЛЯ OPENAI
+# КОНТЕКСТ ПАМЯТИ
 # =========================================================
 
-def build_saved_context(chat_id):
-    memories = get_memories(chat_id)
-    tasks = get_open_tasks(chat_id)
+def build_saved_context(
+    chat_id
+):
+    memories = get_memories(
+        chat_id
+    )
+
+    tasks = get_open_tasks(
+        chat_id
+    )
 
     sections = []
 
@@ -2185,7 +2817,9 @@ def build_saved_context(chat_id):
             )
         )
 
-    return "\n\n".join(sections)
+    return "\n\n".join(
+        sections
+    )
 
 
 # =========================================================
@@ -2199,7 +2833,12 @@ def extract_openai_text(data):
         "output",
         []
     ):
-        if item.get("type") != "message":
+        if (
+            item.get(
+                "type"
+            )
+            != "message"
+        ):
             continue
 
         for content in item.get(
@@ -2207,7 +2846,9 @@ def extract_openai_text(data):
             []
         ):
             if (
-                content.get("type")
+                content.get(
+                    "type"
+                )
                 == "output_text"
             ):
                 value = content.get(
@@ -2216,10 +2857,14 @@ def extract_openai_text(data):
                 )
 
                 if value:
-                    texts.append(value)
+                    texts.append(
+                        value
+                    )
 
     if texts:
-        return "\n".join(texts)
+        return "\n".join(
+            texts
+        )
 
     return (
         "Я получила ответ, "
@@ -2234,15 +2879,21 @@ def ask_openai(
 ):
     sections = []
 
-    saved_context = build_saved_context(
-        chat_id
+    saved_context = (
+        build_saved_context(
+            chat_id
+        )
     )
 
     if saved_context:
-        sections.append(saved_context)
+        sections.append(
+            saved_context
+        )
 
     if extra_context:
-        sections.append(extra_context)
+        sections.append(
+            extra_context
+        )
 
     sections.append(
         "ТЕКУЩЕЕ СООБЩЕНИЕ МАШИ:\n"
@@ -2287,7 +2938,8 @@ def ask_openai(
     )
 
     if (
-        response.status_code == 400
+        response.status_code
+        == 400
         and previous_id
     ):
         clear_previous_response_id(
@@ -2318,7 +2970,9 @@ def ask_openai(
 
     data = response.json()
 
-    response_id = data.get("id")
+    response_id = data.get(
+        "id"
+    )
 
     if response_id:
         save_previous_response_id(
@@ -2326,7 +2980,9 @@ def ask_openai(
             response_id
         )
 
-    return extract_openai_text(data)
+    return extract_openai_text(
+        data
+    )
 
 
 # =========================================================
@@ -2374,17 +3030,20 @@ def review_calendar(
 
 
 # =========================================================
-# ПРОСТЫЕ ПОКАЗЫ
+# ПОКАЗ ЗАДАЧ / ПАМЯТИ
 # =========================================================
 
 def show_tasks(chat_id):
-    tasks = get_open_tasks(chat_id)
+    tasks = get_open_tasks(
+        chat_id
+    )
 
     if not tasks:
         send_message(
             chat_id,
             "Сейчас открытых задач нет."
         )
+
         return
 
     send_message(
@@ -2401,7 +3060,9 @@ def show_tasks(chat_id):
 
 
 def show_memory(chat_id):
-    memories = get_memories(chat_id)
+    memories = get_memories(
+        chat_id
+    )
 
     if not memories:
         send_message(
@@ -2409,6 +3070,7 @@ def show_memory(chat_id):
             "В постоянной памяти "
             "пока ничего нет."
         )
+
         return
 
     send_message(
@@ -2420,6 +3082,50 @@ def show_memory(chat_id):
                 f"{row['text']}"
             )
             for row in memories
+        )
+    )
+
+
+def show_mail_contacts(chat_id):
+    rows = list_verified_mail_contacts(
+        chat_id
+    )
+
+    if not rows:
+        send_message(
+            chat_id,
+            "Проверенных почтовых контактов "
+            "пока нет."
+        )
+
+        return
+
+    lines = [
+        "Проверенные почтовые контакты:"
+    ]
+
+    for row in rows:
+        lines.append(
+            "\n"
+            f"{row['alias']} → "
+            f"{row['email']}"
+        )
+
+        if row[
+            "display_name"
+        ]:
+            lines.append(
+                str(
+                    row[
+                        "display_name"
+                    ]
+                )
+            )
+
+    send_message(
+        chat_id,
+        "\n".join(
+            lines
         )
     )
 
@@ -2454,12 +3160,18 @@ def try_handle_mail(
         normalized
     )
 
+    # ---------------------------------------------
+    # CONNECTION
+    # ---------------------------------------------
+
     if clean == "/mail":
         try:
             client = get_mail_connection()
 
-            folders = get_useful_mail_folders(
-                client
+            folders = (
+                get_useful_mail_folders(
+                    client
+                )
             )
 
             client.logout()
@@ -2485,6 +3197,63 @@ def try_handle_mail(
 
         return True
 
+    # ---------------------------------------------
+    # CONTACTS
+    # ---------------------------------------------
+
+    if clean in {
+        "/mailcontacts",
+        "почтовые контакты",
+        "покажи почтовые контакты"
+    }:
+        show_mail_contacts(
+            chat_id
+        )
+
+        return True
+
+    forget_match = re.match(
+        r"^(?:"
+        r"/mailforget|"
+        r"забудь почтовый контакт"
+        r")"
+        r"\s+(.+)$",
+        normalized,
+        flags=re.IGNORECASE
+    )
+
+    if forget_match:
+        query = (
+            forget_match
+            .group(1)
+            .strip()
+        )
+
+        deleted = forget_mail_contact(
+            chat_id,
+            query
+        )
+
+        if deleted:
+            send_message(
+                chat_id,
+                f"Удалила почтовую связь "
+                f"для «{query}» ✅"
+            )
+
+        else:
+            send_message(
+                chat_id,
+                f"Почтового контакта "
+                f"«{query}» не нашла."
+            )
+
+        return True
+
+    # ---------------------------------------------
+    # RECENT
+    # ---------------------------------------------
+
     if clean in {
         "/mailrecent",
         "последние письма",
@@ -2498,8 +3267,10 @@ def try_handle_mail(
                 "Смотрю почту..."
             )
 
-            messages = get_recent_mail(
-                limit=10
+            messages = (
+                get_recent_mail(
+                    limit=10
+                )
             )
 
             send_message(
@@ -2523,6 +3294,10 @@ def try_handle_mail(
 
         return True
 
+    # ---------------------------------------------
+    # SEARCH
+    # ---------------------------------------------
+
     search_patterns = [
         r"^найди\s+письмо\s+(?:про|от|по)?\s*(.+)$",
         r"^найди\s+письма\s+(?:про|от|по)?\s*(.+)$",
@@ -2545,13 +3320,18 @@ def try_handle_mail(
         if not match:
             continue
 
-        query = match.group(1).strip()
+        query = (
+            match.group(1)
+            .strip()
+        )
 
         if not query:
             return False
 
         try:
-            started_at = time.time()
+            started_at = (
+                time.time()
+            )
 
             send_message(
                 chat_id,
@@ -2571,7 +3351,10 @@ def try_handle_mail(
 
             print(
                 "Mail search finished in",
-                round(search_seconds, 2),
+                round(
+                    search_seconds,
+                    2
+                ),
                 "seconds"
             )
 
@@ -2583,6 +3366,7 @@ def try_handle_mail(
                         "ничего не нашла."
                     )
                 )
+
                 return True
 
             context = mail_context(
@@ -2639,7 +3423,9 @@ def try_handle_calendar(
     chat_id,
     text
 ):
-    clean = strip_punctuation(text)
+    clean = strip_punctuation(
+        text
+    )
 
     today = datetime.now(
         CALENDAR_TZ
@@ -2886,6 +3672,7 @@ def try_handle_command(
             "задачи, Яндекс.Календарь "
             "и read-only Яндекс.Почта."
         )
+
         return True
 
     if clean == "/health":
@@ -2893,6 +3680,7 @@ def try_handle_command(
             chat_id,
             "Я работаю ✅"
         )
+
         return True
 
     if clean == "/new":
@@ -2905,6 +3693,7 @@ def try_handle_command(
             "Начинаем новый разговор. "
             "Память и задачи я не забыла."
         )
+
         return True
 
     if clean == "/calendar":
@@ -2960,7 +3749,10 @@ def try_handle_command(
         "какие у меня задачи",
         "что у меня по задачам"
     }:
-        show_tasks(chat_id)
+        show_tasks(
+            chat_id
+        )
+
         return True
 
     done_match = re.match(
@@ -2990,6 +3782,7 @@ def try_handle_command(
                 chat_id,
                 f"Задачу #{task_id} закрыла ✅"
             )
+
         else:
             send_message(
                 chat_id,
@@ -3047,7 +3840,10 @@ def try_handle_command(
         "что ты обо мне помнишь",
         "что ты запомнила"
     }:
-        show_memory(chat_id)
+        show_memory(
+            chat_id
+        )
+
         return True
 
     forget_match = re.match(
@@ -3076,6 +3872,7 @@ def try_handle_command(
                 f"Удалила запись "
                 f"#{memory_id} из памяти."
             )
+
         else:
             send_message(
                 chat_id,
@@ -3134,7 +3931,7 @@ def main():
 
     print(
         "Masha 2.0 запущена: "
-        "SQLite + OpenAI + Calendar + fast IMAP v3."
+        "SQLite + OpenAI + Calendar + safe mail cache v4."
     )
 
     offset = None
@@ -3145,7 +3942,9 @@ def main():
         }
 
         if offset is not None:
-            params["offset"] = offset
+            params[
+                "offset"
+            ] = offset
 
         try:
             response = requests.get(
@@ -3155,6 +3954,7 @@ def main():
             )
 
             response.raise_for_status()
+
             data = response.json()
 
             for update in data.get(
@@ -3174,7 +3974,11 @@ def main():
                     continue
 
                 chat_id = (
-                    message["chat"]["id"]
+                    message[
+                        "chat"
+                    ][
+                        "id"
+                    ]
                 )
 
                 text = message.get(
@@ -3233,6 +4037,7 @@ def main():
                         status = (
                             e.response.status_code
                         )
+
                         error_text = (
                             e.response.text
                         )
@@ -3266,6 +4071,7 @@ def main():
                 "Telegram network error:",
                 repr(e)
             )
+
             time.sleep(3)
 
         except Exception as e:
@@ -3273,6 +4079,7 @@ def main():
                 "Telegram error:",
                 repr(e)
             )
+
             time.sleep(3)
 
 
