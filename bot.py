@@ -27,7 +27,6 @@ YANDEX_CALDAV_URL = "https://caldav.yandex.ru/"
 
 DB_PATH = "/data/masha.db"
 
-# Рабочий календарь считаем по московскому времени.
 CALENDAR_TZ = ZoneInfo("Europe/Moscow")
 
 
@@ -425,7 +424,6 @@ def get_yandex_calendars():
 
     principal = client.principal()
 
-    # Совместимость с разными версиями python-caldav
     try:
         calendars = principal.get_calendars()
     except AttributeError:
@@ -435,13 +433,6 @@ def get_yandex_calendars():
 
 
 def normalize_calendar_datetime(value):
-    """
-    Приводит дату/время события к Europe/Moscow.
-
-    Возвращает:
-    (datetime, all_day)
-    """
-
     if isinstance(value, datetime):
         dt = value
 
@@ -477,7 +468,9 @@ def extract_event_from_ical(
         return []
 
     if isinstance(ical_data, str):
-        ical_data = ical_data.encode("utf-8")
+        ical_data = ical_data.encode(
+            "utf-8"
+        )
 
     parsed = Calendar.from_ical(
         ical_data
@@ -548,7 +541,15 @@ def extract_event_from_ical(
             )
         )
 
+        uid = str(
+            component.get(
+                "UID",
+                ""
+            )
+        )
+
         result.append({
+            "uid": uid,
             "summary": summary,
             "start": start,
             "end": end,
@@ -563,20 +564,17 @@ def extract_event_from_ical(
 
 
 def get_calendar_events(start_dt, end_dt):
-    """
-    Читает события из всех календарей пользователя
-    за указанный диапазон.
-
-    Никаких изменений календаря здесь нет.
-    """
-
     calendars = get_yandex_calendars()
 
     collected = []
 
     for calendar in calendars:
         calendar_name = (
-            getattr(calendar, "name", None)
+            getattr(
+                calendar,
+                "name",
+                None
+            )
             or "Календарь"
         )
 
@@ -586,8 +584,8 @@ def get_calendar_events(start_dt, end_dt):
                 end=end_dt,
                 expand=True
             )
+
         except TypeError:
-            # Для версий библиотеки с позиционными аргументами
             events = calendar.date_search(
                 start_dt,
                 end_dt,
@@ -596,11 +594,9 @@ def get_calendar_events(start_dt, end_dt):
 
         for event in events:
             try:
-                ical_data = event.data
-
                 parsed_events = (
                     extract_event_from_ical(
-                        ical_data,
+                        event.data,
                         calendar_name
                     )
                 )
@@ -615,18 +611,74 @@ def get_calendar_events(start_dt, end_dt):
                     repr(e)
                 )
 
-    # Иногда одно и то же событие может попасть
-    # из CalDAV несколько раз.
+    # -----------------------------------------------------
+    # УДАЛЯЕМ ДУБЛИ
+    #
+    # Одна и та же встреча может присутствовать
+    # одновременно в календаре Маши и календаре МС.
+    #
+    # Название календаря специально НЕ включаем в ключ.
+    # -----------------------------------------------------
+
     unique = {}
 
     for event in collected:
-        key = (
-            event["summary"],
-            event["start"].isoformat(),
-            event["calendar"]
+        start_key = (
+            event["start"].isoformat()
+            if event["start"]
+            else ""
         )
 
-        unique[key] = event
+        end_key = (
+            event["end"].isoformat()
+            if event["end"]
+            else ""
+        )
+
+        summary_key = (
+            event["summary"]
+            .strip()
+            .lower()
+        )
+
+        key = (
+            summary_key,
+            start_key,
+            end_key
+        )
+
+        if key not in unique:
+            unique[key] = event
+            continue
+
+        # Если дубль из другого календаря содержит
+        # больше полезной информации, дополняем первую запись.
+
+        existing = unique[key]
+
+        if (
+            not existing["location"]
+            and event["location"]
+        ):
+            existing["location"] = (
+                event["location"]
+            )
+
+        if (
+            not existing["description"]
+            and event["description"]
+        ):
+            existing["description"] = (
+                event["description"]
+            )
+
+        if (
+            not existing["url"]
+            and event["url"]
+        ):
+            existing["url"] = (
+                event["url"]
+            )
 
     result = list(
         unique.values()
@@ -697,14 +749,18 @@ def format_calendar_day(
             "В календаре событий нет."
         )
 
-    lines = [title]
+    lines = [
+        title
+    ]
 
     for event in events:
         lines.append(
             format_event(event)
         )
 
-    return "\n\n".join(lines)
+    return "\n\n".join(
+        lines
+    )
 
 
 def format_calendar_period(
@@ -739,7 +795,9 @@ def format_calendar_period(
     for event in events:
         event_date = (
             event["start"]
-            .astimezone(CALENDAR_TZ)
+            .astimezone(
+                CALENDAR_TZ
+            )
             .date()
         )
 
@@ -747,8 +805,6 @@ def format_calendar_period(
             event_date,
             []
         ).append(event)
-
-    lines = []
 
     weekday_names = {
         0: "Пн",
@@ -759,6 +815,8 @@ def format_calendar_period(
         5: "Сб",
         6: "Вс"
     }
+
+    lines = []
 
     for event_date in sorted(
         grouped.keys()
@@ -784,78 +842,6 @@ def format_calendar_period(
     return "\n".join(
         lines
     ).strip()
-
-
-def calendar_context_for_period(
-    start_date,
-    days=1
-):
-    """
-    Текстовая версия календаря,
-    которую можно передать OpenAI.
-    """
-
-    start_dt = datetime(
-        start_date.year,
-        start_date.month,
-        start_date.day,
-        tzinfo=CALENDAR_TZ
-    )
-
-    end_dt = (
-        start_dt
-        + timedelta(days=days)
-    )
-
-    events = get_calendar_events(
-        start_dt,
-        end_dt
-    )
-
-    if not events:
-        return "КАЛЕНДАРЬ:\nСобытий нет."
-
-    lines = ["КАЛЕНДАРЬ:"]
-
-    for event in events:
-        start = event["start"]
-
-        if event["all_day"]:
-            when = (
-                start.strftime("%d.%m.%Y")
-                + ", весь день"
-            )
-
-        elif event["end"]:
-            when = (
-                start.strftime(
-                    "%d.%m.%Y %H:%M"
-                )
-                + "–"
-                + event["end"].strftime(
-                    "%H:%M"
-                )
-            )
-
-        else:
-            when = start.strftime(
-                "%d.%m.%Y %H:%M"
-            )
-
-        line = (
-            f"- {when}: "
-            f"{event['summary']}"
-        )
-
-        if event["location"]:
-            line += (
-                f"; адрес/место: "
-                f"{event['location']}"
-            )
-
-        lines.append(line)
-
-    return "\n".join(lines)
 
 
 # =========================================================
@@ -934,7 +920,9 @@ def extract_openai_text(data):
                     texts.append(text)
 
     if texts:
-        return "\n".join(texts)
+        return "\n".join(
+            texts
+        )
 
     return (
         "Я получила ответ, "
@@ -1062,7 +1050,7 @@ def ask_openai(
 
 
 # =========================================================
-# ПОКАЗ ЗАДАЧ / ПАМЯТИ
+# ПОКАЗ ЗАДАЧ И ПАМЯТИ
 # =========================================================
 
 def show_tasks(chat_id):
@@ -1123,7 +1111,7 @@ def show_memory(chat_id):
 
 
 # =========================================================
-# РАСПОЗНАВАНИЕ КАЛЕНДАРНЫХ ЗАПРОСОВ
+# ТЕКСТОВАЯ НОРМАЛИЗАЦИЯ
 # =========================================================
 
 def strip_punctuation(text):
@@ -1133,6 +1121,10 @@ def strip_punctuation(text):
         text.strip().lower()
     ).strip()
 
+
+# =========================================================
+# КАЛЕНДАРНЫЕ КОМАНДЫ
+# =========================================================
 
 def try_handle_calendar(
     chat_id,
@@ -1291,7 +1283,6 @@ def try_handle_command(
         normalized
     )
 
-
     # START
 
     if clean == "/start":
@@ -1306,7 +1297,6 @@ def try_handle_command(
 
         return True
 
-
     # HEALTH
 
     if clean == "/health":
@@ -1317,7 +1307,6 @@ def try_handle_command(
         )
 
         return True
-
 
     # НОВЫЙ ДИАЛОГ
 
@@ -1335,7 +1324,6 @@ def try_handle_command(
         )
 
         return True
-
 
     # ТЕСТ КАЛЕНДАРЯ
 
@@ -1357,7 +1345,9 @@ def try_handle_command(
                     or "Календарь"
                 )
 
-                names.append(name)
+                names.append(
+                    name
+                )
 
             if names:
                 text_result = (
@@ -1398,7 +1388,6 @@ def try_handle_command(
 
         return True
 
-
     # СПИСОК ЗАДАЧ
 
     task_list_phrases = {
@@ -1418,7 +1407,6 @@ def try_handle_command(
         )
 
         return True
-
 
     # ЗАКРЫТИЕ ЗАДАЧИ
 
@@ -1459,7 +1447,6 @@ def try_handle_command(
             )
 
         return True
-
 
     # ДОБАВЛЕНИЕ ЗАДАЧИ
 
@@ -1502,7 +1489,6 @@ def try_handle_command(
 
             return True
 
-
     # ПОКАЗ ПАМЯТИ
 
     memory_phrases = {
@@ -1521,7 +1507,6 @@ def try_handle_command(
         )
 
         return True
-
 
     # УДАЛЕНИЕ ИЗ ПАМЯТИ
 
@@ -1560,7 +1545,6 @@ def try_handle_command(
             )
 
         return True
-
 
     # СОХРАНЕНИЕ В ПАМЯТЬ
 
@@ -1674,7 +1658,7 @@ def main():
                     repr(text)
                 )
 
-                # Сначала календарь
+                # Сначала календарные команды
                 if try_handle_calendar(
                     chat_id,
                     text
@@ -1688,7 +1672,7 @@ def main():
                 ):
                     continue
 
-                # Обычный разговор с ИИ
+                # Обычный разговор с OpenAI
                 send_message(
                     chat_id,
                     "Думаю..."
