@@ -9,16 +9,13 @@ import caldav
 
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
-
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime, getaddresses
-
 from icalendar import Calendar
 from imapclient import IMAPClient
 
-
 # =========================================================
-# НАСТРОЙКИ
+# CONFIG
 # =========================================================
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -26,192 +23,96 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 
 YANDEX_CALENDAR_LOGIN = os.environ["YANDEX_CALENDAR_LOGIN"]
 YANDEX_CALENDAR_PASSWORD = os.environ["YANDEX_CALENDAR_PASSWORD"]
-
 YANDEX_MAIL_LOGIN = os.environ["YANDEX_MAIL_LOGIN"]
 YANDEX_MAIL_PASSWORD = os.environ["YANDEX_MAIL_PASSWORD"]
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 OPENAI_URL = "https://api.openai.com/v1/responses"
-
 YANDEX_CALDAV_URL = "https://caldav.yandex.ru/"
 YANDEX_IMAP_HOST = "imap.yandex.com"
 YANDEX_IMAP_PORT = 993
 
 DB_PATH = "/data/masha.db"
-CALENDAR_TZ = ZoneInfo("Europe/Moscow")
-
-
-# =========================================================
-# ИНСТРУКЦИЯ
-# =========================================================
+TZ = ZoneInfo("Europe/Moscow")
+MODEL = "gpt-5.6"
 
 ASSISTANT_INSTRUCTIONS = """
 Ты Маша 2.0 — личный рабочий ассистент Маши.
 
-Главная цель:
-разгружать Маше голову и помогать держать под контролем встречи,
-задачи, дедлайны, материалы, договоренности, переписку
-и организационный хаос.
+Твоя задача — разгружать Маше голову: держать под контролем календарь,
+почту, задачи, процессы, дедлайны, документы, подписи, оплаты,
+зависшие хвосты и договоренности.
 
-КОНТЕКСТ РАБОТЫ
+ВАЖНО: рабочие задачи Маши не обязаны напрямую касаться МС.
+Учитывай административные, бухгалтерские, закупочные, кадровые,
+документальные и организационные процессы Маши как полноценную работу.
 
+КОНТЕКСТ КАЛЕНДАРЯ
 - Маша работает бизнес-ассистентом руководителя МС.
-- МС может внезапно попросить 30 минут с кем-то из директоров,
-  поэтому важно сохранять свободные окна под срочное.
-- ТМС не двигаем.
-- Advisory Board не двигаем.
-- Тренировки и психоаналитика Маши не двигаем.
-- Для 1-2-1 повестку начинаем собирать минимум за неделю.
-- Материалы желательно получать минимум за 2 суток, лучше раньше.
-- Если нет необходимых материалов или повестки,
-  нужно отдельно обратить внимание.
-
-ПРЕДПОЧТЕНИЯ КАЛЕНДАРЯ
-
+- ТМС и Advisory Board не двигаем.
+- Тренировки и психоаналитика Маши тоже не двигаем.
+- МС может внезапно попросить 30 минут с директором — сохраняй окна.
+- Для 1-2-1 повестку желательно собирать за неделю.
+- Материалы к встречам желательно получать минимум за 2 суток.
 - Понедельник желательно оставлять под фокус.
 - Пятница предпочтительна для внешних встреч.
-- Желательный рабочий диапазон примерно 10:30–19:00.
 - Между встречами желательно 15–30 минут воздуха.
 - Обед не совмещать с внутренними встречами.
-- Сохранять окна для срочного и собеседований.
 
 ЧЕК-ЛИСТ ВСТРЕЧ
-
-- Для Zoom должна быть ссылка.
-- Участники должны подтвердить присутствие.
+- Zoom: должна быть ссылка.
+- Внешняя встреча: должен быть адрес.
 - В описании должна быть повестка.
-- Для внешней встречи нужен адрес.
-- В календаре должен оставаться обед.
-- Для собеседования резюме должно быть вложено и распечатано.
-- Для PRM заранее собрать материалы руководителей
-  в онлайн-папку и проверить доступ.
+- Участники должны подтвердить присутствие.
+- Собеседование: резюме вложено и распечатано.
+- PRM: материалы собраны заранее, доступ к папке проверен.
+
+ПРОЦЕССЫ
+Процесс — это не одна задача, а цепочка этапов с зависимостями.
+Если тебе передан блок ПРОЦЕССЫ, анализируй:
+- какой следующий реально доступный шаг;
+- что заблокировано предыдущими этапами;
+- где ждём подпись, документ, счёт, оплату или человека;
+- что пора проконтролировать;
+- какие хвосты давно висят.
+Не советуй выполнять этап, если его зависимости ещё не завершены.
 
 ПОЧТА
-
-У тебя есть read-only доступ к реальным письмам,
-которые программа передает тебе.
-
-Ты можешь:
-- анализировать найденные письма;
-- связывать несколько писем в одну историю;
-- выделять договоренности;
-- находить вопросы без ответа;
-- определять следующий шаг;
-- связывать письмо с сохраненной задачей;
-- помогать подготовить ответ.
-
-Ты НЕ можешь:
-- утверждать, что письмо отправлено;
-- удалять письма;
-- переносить письма;
-- архивировать письма;
-- менять флаги;
-- придумывать содержимое писем.
-
-Если передано несколько связанных писем:
-- учитывай хронологию;
-- собери суть цепочки;
-- не пересказывай каждое письмо без необходимости;
-- скажи, какое письмо вероятнее всего искала Маша.
-
-КАК РАБОТАТЬ С МАШЕЙ
-
-- Отвечай по-русски.
-- Говори естественно и без канцелярита.
-- На простой вопрос отвечай коротко.
-- Хаотичное сообщение сама структурируй.
-- Учитывай предыдущий диалог.
-- Учитывай ПОСТОЯННУЮ ПАМЯТЬ.
-- Учитывай ОТКРЫТЫЕ ЗАДАЧИ.
-- Учитывай реальные данные КАЛЕНДАРЯ и ПОЧТЫ.
-- Не заставляй Машу повторять известное.
-- Не утверждай, что выполнила действие, если оно не выполнено.
-- Календарь пока только читаешь.
-- Почту пока только читаешь.
+У тебя read-only доступ к письмам, которые программа передает тебе.
+Можно анализировать цепочки, выделять договорённости и следующий шаг.
+Нельзя утверждать, что письмо отправлено/удалено/архивировано, если этого не было.
 
 ДОСТОВЕРНОСТЬ
+Не придумывай отсутствующие сведения.
+Если в календаре нет повестки/адреса — так и говори.
+Если почта ничего не нашла — так и говори.
+Если система не умеет сама проверить 1С — скажи, что статус нужно проверить Маше.
 
-Если в календаре нет описания, говори:
-"в данных календаря не вижу повестки".
-
-Если в событии нет location:
-"в данных события не вижу адреса".
-
-Если поиск почты ничего не нашел:
-так и скажи.
-
-Не придумывай адресатов, вложения, решения
-или содержание писем.
-
-ФОРМАТ
-
-Telegram получает обычный текст.
-Не используй Markdown-разметку.
-Пиши компактно и практично.
+СТИЛЬ
+Отвечай по-русски, естественно, коротко и практично.
+Telegram получает обычный текст — без Markdown-разметки.
 """
 
-
 # =========================================================
-# БАЗА
+# DB
 # =========================================================
 
 def ensure_data_directory():
-    os.makedirs(
-        os.path.dirname(DB_PATH),
-        exist_ok=True
-    )
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 
 def get_db():
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=30
-    )
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def ensure_mail_contacts_schema(conn):
-    columns = conn.execute(
-        "PRAGMA table_info(mail_contacts)"
-    ).fetchall()
-
-    names = {row[1] for row in columns}
-
-    if "verified" not in names:
-        conn.execute("""
-            ALTER TABLE mail_contacts
-            ADD COLUMN verified INTEGER NOT NULL DEFAULT 0
-        """)
-
-    if "source" not in names:
-        conn.execute("""
-            ALTER TABLE mail_contacts
-            ADD COLUMN source TEXT DEFAULT 'legacy'
-        """)
-
-
-def cleanup_bad_mail_contacts(conn):
-    """
-    Удаляем технические адреса, которые старые версии
-    могли ошибочно принять за человека.
-    """
-
-    conn.execute("""
-        DELETE FROM mail_contacts
-        WHERE
-            lower(email) LIKE '%@calendar.yandex.ru'
-            OR lower(email) LIKE '%@mailer.yandex.ru'
-            OR lower(email) LIKE 'noreply@%'
-            OR lower(email) LIKE 'no-reply@%'
-            OR lower(email) LIKE 'mailer-daemon@%'
-            OR lower(email) LIKE 'postmaster@%'
-    """)
+def column_names(conn, table):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
 def init_db():
     ensure_data_directory()
-
     conn = get_db()
 
     conn.execute("""
@@ -255,236 +156,424 @@ def init_db():
         )
     """)
 
-    ensure_mail_contacts_schema(conn)
-    cleanup_bad_mail_contacts(conn)
+    # Migration from older mail_contacts schema
+    names = column_names(conn, "mail_contacts")
+    if "verified" not in names:
+        conn.execute("ALTER TABLE mail_contacts ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
+    if "source" not in names:
+        conn.execute("ALTER TABLE mail_contacts ADD COLUMN source TEXT DEFAULT 'legacy'")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS processes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            notes TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS process_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            process_id INTEGER NOT NULL,
+            step_no INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            depends_on TEXT DEFAULT '',
+            waiting_for TEXT DEFAULT '',
+            due_at TEXT,
+            remind_every_days INTEGER DEFAULT 0,
+            last_reminded_at TEXT,
+            completed_at TEXT,
+            UNIQUE(process_id, step_no),
+            FOREIGN KEY(process_id) REFERENCES processes(id)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS process_meta (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            process_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            UNIQUE(process_id, key),
+            FOREIGN KEY(process_id) REFERENCES processes(id)
+        )
+    """)
+
+    # Clean bad system contacts from previous versions
+    conn.execute("""
+        DELETE FROM mail_contacts
+        WHERE lower(email) LIKE '%@calendar.yandex.ru'
+           OR lower(email) LIKE '%@mailer.yandex.ru'
+           OR lower(email) LIKE 'noreply@%'
+           OR lower(email) LIKE 'no-reply@%'
+           OR lower(email) LIKE 'mailer-daemon@%'
+           OR lower(email) LIKE 'postmaster@%'
+    """)
 
     conn.commit()
     conn.close()
 
-
 # =========================================================
-# ЗАДАЧИ
+# TASKS / MEMORY
 # =========================================================
 
 def add_task(chat_id, text):
     conn = get_db()
-
-    cursor = conn.execute(
-        """
-        INSERT INTO tasks (
-            chat_id,
-            text,
-            status,
-            created_at
-        )
-        VALUES (?, ?, 'open', ?)
-        """,
-        (
-            chat_id,
-            text.strip(),
-            datetime.now().isoformat(
-                timespec="seconds"
-            )
-        )
+    cur = conn.execute(
+        "INSERT INTO tasks(chat_id,text,status,created_at) VALUES (?,?,'open',?)",
+        (chat_id, text.strip(), datetime.now(TZ).isoformat(timespec="seconds")),
     )
-
-    task_id = cursor.lastrowid
-
-    conn.commit()
-    conn.close()
-
+    task_id = cur.lastrowid
+    conn.commit(); conn.close()
     return task_id
 
 
 def get_open_tasks(chat_id):
     conn = get_db()
-
     rows = conn.execute(
-        """
-        SELECT id, text, created_at
-        FROM tasks
-        WHERE chat_id = ?
-        AND status = 'open'
-        ORDER BY id
-        """,
-        (chat_id,)
+        "SELECT id,text,created_at FROM tasks WHERE chat_id=? AND status='open' ORDER BY id",
+        (chat_id,),
     ).fetchall()
-
-    conn.close()
-
-    return rows
+    conn.close(); return rows
 
 
 def complete_task(chat_id, task_id):
     conn = get_db()
-
-    cursor = conn.execute(
-        """
-        UPDATE tasks
-        SET status = 'done',
-            completed_at = ?
-        WHERE chat_id = ?
-        AND id = ?
-        AND status = 'open'
-        """,
-        (
-            datetime.now().isoformat(
-                timespec="seconds"
-            ),
-            chat_id,
-            task_id
-        )
+    cur = conn.execute(
+        "UPDATE tasks SET status='done',completed_at=? WHERE chat_id=? AND id=? AND status='open'",
+        (datetime.now(TZ).isoformat(timespec="seconds"), chat_id, task_id),
     )
+    ok = cur.rowcount > 0
+    conn.commit(); conn.close(); return ok
 
-    changed = cursor.rowcount
-
-    conn.commit()
-    conn.close()
-
-    return changed > 0
-
-
-# =========================================================
-# ПАМЯТЬ
-# =========================================================
 
 def add_memory(chat_id, text):
     conn = get_db()
-
-    cursor = conn.execute(
-        """
-        INSERT INTO memories (
-            chat_id,
-            text,
-            created_at
-        )
-        VALUES (?, ?, ?)
-        """,
-        (
-            chat_id,
-            text.strip(),
-            datetime.now().isoformat(
-                timespec="seconds"
-            )
-        )
+    cur = conn.execute(
+        "INSERT INTO memories(chat_id,text,created_at) VALUES (?,?,?)",
+        (chat_id, text.strip(), datetime.now(TZ).isoformat(timespec="seconds")),
     )
-
-    memory_id = cursor.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    return memory_id
+    memory_id = cur.lastrowid
+    conn.commit(); conn.close(); return memory_id
 
 
 def get_memories(chat_id):
     conn = get_db()
-
     rows = conn.execute(
-        """
-        SELECT id, text, created_at
-        FROM memories
-        WHERE chat_id = ?
-        ORDER BY id
-        """,
-        (chat_id,)
+        "SELECT id,text,created_at FROM memories WHERE chat_id=? ORDER BY id", (chat_id,)
     ).fetchall()
-
-    conn.close()
-
-    return rows
+    conn.close(); return rows
 
 
 def delete_memory(chat_id, memory_id):
     conn = get_db()
-
-    cursor = conn.execute(
-        """
-        DELETE FROM memories
-        WHERE chat_id = ?
-        AND id = ?
-        """,
-        (
-            chat_id,
-            memory_id
-        )
-    )
-
-    changed = cursor.rowcount
-
-    conn.commit()
-    conn.close()
-
-    return changed > 0
-
+    cur = conn.execute("DELETE FROM memories WHERE chat_id=? AND id=?", (chat_id, memory_id))
+    ok = cur.rowcount > 0
+    conn.commit(); conn.close(); return ok
 
 # =========================================================
-# OPENAI DIALOG STATE
+# PROCESSES
+# =========================================================
+
+def create_process(chat_id, title, notes=""):
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO processes(chat_id,title,status,notes,created_at) VALUES (?,?,'open',?,?)",
+        (chat_id, title.strip(), notes.strip(), datetime.now(TZ).isoformat(timespec="seconds")),
+    )
+    pid = cur.lastrowid
+    conn.commit(); conn.close(); return pid
+
+
+def add_process_step(process_id, step_no, text, depends_on="", waiting_for="", due_at=None, remind_every_days=0):
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO process_steps(
+            process_id,step_no,text,status,depends_on,waiting_for,due_at,remind_every_days
+        ) VALUES (?,?,?,'open',?,?,?,?)
+    """, (process_id, step_no, text.strip(), depends_on, waiting_for, due_at, remind_every_days))
+    conn.commit(); conn.close()
+
+
+def set_process_meta(process_id, key, value):
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO process_meta(process_id,key,value) VALUES (?,?,?)
+        ON CONFLICT(process_id,key) DO UPDATE SET value=excluded.value
+    """, (process_id, key, str(value)))
+    conn.commit(); conn.close()
+
+
+def get_process_meta(process_id):
+    conn = get_db()
+    rows = conn.execute("SELECT key,value FROM process_meta WHERE process_id=?", (process_id,)).fetchall()
+    conn.close(); return {r["key"]: r["value"] for r in rows}
+
+
+def get_open_processes(chat_id):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM processes WHERE chat_id=? AND status='open' ORDER BY id", (chat_id,)
+    ).fetchall()
+    conn.close(); return rows
+
+
+def get_process(process_id, chat_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM processes WHERE id=? AND chat_id=?", (process_id, chat_id)).fetchone()
+    conn.close(); return row
+
+
+def get_process_steps(process_id):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM process_steps WHERE process_id=? ORDER BY step_no", (process_id,)
+    ).fetchall()
+    conn.close(); return rows
+
+
+def parse_depends(depends_on):
+    if not depends_on:
+        return []
+    result = []
+    for part in str(depends_on).split(","):
+        part = part.strip()
+        if part.isdigit():
+            result.append(int(part))
+    return result
+
+
+def is_step_available(step, steps_by_no):
+    if step["status"] != "open":
+        return False
+    for dep_no in parse_depends(step["depends_on"]):
+        dep = steps_by_no.get(dep_no)
+        if not dep or dep["status"] != "done":
+            return False
+    return True
+
+
+def complete_process_step(chat_id, process_id, step_no):
+    process = get_process(process_id, chat_id)
+    if not process:
+        return False, "Не нашла такой процесс."
+
+    conn = get_db()
+    cur = conn.execute("""
+        UPDATE process_steps
+        SET status='done', completed_at=?
+        WHERE process_id=? AND step_no=? AND status='open'
+    """, (datetime.now(TZ).isoformat(timespec="seconds"), process_id, step_no))
+    changed = cur.rowcount > 0
+    conn.commit(); conn.close()
+
+    if not changed:
+        return False, f"Этап {step_no} не найден или уже закрыт."
+
+    # Close whole process if every step is done
+    steps = get_process_steps(process_id)
+    if steps and all(s["status"] == "done" for s in steps):
+        conn = get_db()
+        conn.execute(
+            "UPDATE processes SET status='done',completed_at=? WHERE id=?",
+            (datetime.now(TZ).isoformat(timespec="seconds"), process_id),
+        )
+        conn.commit(); conn.close()
+        return True, f"Этап {step_no} закрыт ✅ И весь процесс завершён."
+
+    return True, f"Этап {step_no} закрыт ✅"
+
+
+def format_process(process_id, chat_id):
+    process = get_process(process_id, chat_id)
+    if not process:
+        return "Не нашла такой процесс."
+
+    steps = get_process_steps(process_id)
+    steps_by_no = {s["step_no"]: s for s in steps}
+    lines = [f"Процесс #{process['id']}: {process['title']}"]
+    if process["notes"]:
+        lines.append(process["notes"])
+    lines.append("")
+
+    for s in steps:
+        if s["status"] == "done":
+            icon = "✅"
+        elif is_step_available(s, steps_by_no):
+            icon = "➡️"
+        else:
+            icon = "⏳"
+
+        line = f"{icon} {s['step_no']}. {s['text']}"
+        if s["waiting_for"]:
+            line += f" [ждём: {s['waiting_for']}]"
+        if s["remind_every_days"]:
+            line += f" [контроль каждые {s['remind_every_days']} дн.]"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def processes_context(chat_id):
+    processes = get_open_processes(chat_id)
+    if not processes:
+        return "ПРОЦЕССЫ:\nОткрытых процессов нет."
+
+    lines = ["ПРОЦЕССЫ:"]
+    for p in processes:
+        steps = get_process_steps(p["id"])
+        by_no = {s["step_no"]: s for s in steps}
+        lines.append(f"\nПроцесс #{p['id']}: {p['title']}")
+        if p["notes"]:
+            lines.append(f"Примечание: {p['notes']}")
+        for s in steps:
+            state = "готово" if s["status"] == "done" else ("доступен" if is_step_available(s, by_no) else "заблокирован")
+            line = f"- {s['step_no']}. [{state}] {s['text']}"
+            if s["waiting_for"]:
+                line += f"; ждём: {s['waiting_for']}"
+            if s["remind_every_days"]:
+                line += f"; контроль каждые {s['remind_every_days']} дн."
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def seed_gift_process(chat_id):
+    # Avoid duplicate test process
+    for p in get_open_processes(chat_id):
+        if normalize_text(p["title"]) == normalize_text("Подарки двум директорам — картины и букеты"):
+            return p["id"], False
+
+    pid = create_process(
+        chat_id,
+        "Подарки двум директорам — картины и букеты",
+        "Картины и букеты уже получены. Остался бухгалтерский и документальный хвост.",
+    )
+
+    steps = [
+        (1, "Подготовить приказ по подаркам по существующему шаблону", "", "", 0),
+        (2, "Получить подпись Анжелики, гендиректора, на приказе", "1", "Анжелика", 0),
+        (3, "Получить согласование/подпись финансов на приказе", "1", "финансы", 0),
+        (4, "Получить подпись Алёны, HR-директора, на приказе", "1", "Алёна", 0),
+        (5, "По художнику №1: подписать акт", "", "художник №1", 0),
+        (6, "По художнику №1: получить счёт на оплату", "", "художник №1", 0),
+        (7, "По художнику №2: подписать акт", "", "художник №2", 0),
+        (8, "По художнику №2: получить счёт на оплату", "", "художник №2", 0),
+        (9, "Создать заявку №1 в 1С и прикрепить счёт + подписанный акт", "2,3,4,5,6", "", 0),
+        (10, "Создать заявку №2 в 1С и прикрепить счёт + подписанный акт", "2,3,4,7,8", "", 0),
+        (11, "Проверять статус заявки №1 в 1С до оплаты", "9", "1С", 2),
+        (12, "Проверять статус заявки №2 в 1С до оплаты", "10", "1С", 2),
+        (13, "Передать оригиналы документов по подаркам в бухгалтерию", "9,10", "бухгалтерия", 0),
+    ]
+    for no, text, deps, waiting, repeat in steps:
+        add_process_step(pid, no, text, deps, waiting, None, repeat)
+
+    set_process_meta(pid, "template_order", "есть шаблон приказа — позже привязать файл на Яндекс.Диске")
+    set_process_meta(pid, "template_act", "есть шаблон акта — позже привязать файл на Яндекс.Диске")
+    set_process_meta(pid, "physical_gifts_received", "yes")
+
+    # Separate backlog process for originals, because it is broader than gifts.
+    existing = [p for p in get_open_processes(chat_id) if normalize_text(p["title"]) == normalize_text("Оригиналы документов в бухгалтерию")]
+    if not existing:
+        opid = create_process(
+            chat_id,
+            "Оригиналы документов в бухгалтерию",
+            "Накопительный административный хвост; оригиналы не передавались с января.",
+        )
+        add_process_step(opid, 1, "Разобрать накопленные оригиналы документов с января", "", "", None, 0)
+        add_process_step(opid, 2, "Сформировать пачку/реестр для передачи в бухгалтерию", "1", "", None, 0)
+        add_process_step(opid, 3, "Передать оригиналы в бухгалтерию", "2", "бухгалтерия", None, 0)
+
+    return pid, True
+
+# =========================================================
+# REMINDERS FOR PROCESS MONITORING
+# =========================================================
+
+def due_process_reminders(chat_id):
+    now = datetime.now(TZ)
+    reminders = []
+
+    for p in get_open_processes(chat_id):
+        steps = get_process_steps(p["id"])
+        by_no = {s["step_no"]: s for s in steps}
+        for s in steps:
+            if not is_step_available(s, by_no):
+                continue
+
+            due = False
+            if s["due_at"]:
+                try:
+                    due_dt = datetime.fromisoformat(s["due_at"])
+                    if due_dt.tzinfo is None:
+                        due_dt = due_dt.replace(tzinfo=TZ)
+                    due = due_dt <= now
+                except Exception:
+                    pass
+
+            repeat_days = int(s["remind_every_days"] or 0)
+            if repeat_days > 0:
+                if not s["last_reminded_at"]:
+                    # For recurring monitoring, don't nag immediately after dependency opens.
+                    # Use completed time of latest dependency as starting point if possible.
+                    deps = parse_depends(s["depends_on"])
+                    opened_at = None
+                    for dep_no in deps:
+                        dep = by_no.get(dep_no)
+                        if dep and dep["completed_at"]:
+                            dt = datetime.fromisoformat(dep["completed_at"])
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=TZ)
+                            if opened_at is None or dt > opened_at:
+                                opened_at = dt
+                    if opened_at and now >= opened_at + timedelta(days=repeat_days):
+                        due = True
+                else:
+                    last = datetime.fromisoformat(s["last_reminded_at"])
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=TZ)
+                    if now >= last + timedelta(days=repeat_days):
+                        due = True
+
+            if due:
+                reminders.append((p, s))
+
+    return reminders
+
+
+def mark_step_reminded(step_id):
+    conn = get_db()
+    conn.execute(
+        "UPDATE process_steps SET last_reminded_at=? WHERE id=?",
+        (datetime.now(TZ).isoformat(timespec="seconds"), step_id),
+    )
+    conn.commit(); conn.close()
+
+# =========================================================
+# OPENAI STATE
 # =========================================================
 
 def get_previous_response_id(chat_id):
     conn = get_db()
-
-    row = conn.execute(
-        """
-        SELECT previous_response_id
-        FROM chat_state
-        WHERE chat_id = ?
-        """,
-        (chat_id,)
-    ).fetchone()
-
-    conn.close()
-
-    if row:
-        return row["previous_response_id"]
-
-    return None
+    row = conn.execute("SELECT previous_response_id FROM chat_state WHERE chat_id=?", (chat_id,)).fetchone()
+    conn.close(); return row["previous_response_id"] if row else None
 
 
-def save_previous_response_id(
-    chat_id,
-    response_id
-):
+def save_previous_response_id(chat_id, response_id):
     conn = get_db()
-
-    conn.execute(
-        """
-        INSERT INTO chat_state (
-            chat_id,
-            previous_response_id
-        )
-        VALUES (?, ?)
-
-        ON CONFLICT(chat_id)
-        DO UPDATE SET
-            previous_response_id =
-            excluded.previous_response_id
-        """,
-        (
-            chat_id,
-            response_id
-        )
-    )
-
-    conn.commit()
-    conn.close()
+    conn.execute("""
+        INSERT INTO chat_state(chat_id,previous_response_id) VALUES (?,?)
+        ON CONFLICT(chat_id) DO UPDATE SET previous_response_id=excluded.previous_response_id
+    """, (chat_id, response_id))
+    conn.commit(); conn.close()
 
 
 def clear_previous_response_id(chat_id):
-    conn = get_db()
-
-    conn.execute(
-        """
-        DELETE FROM chat_state
-        WHERE chat_id = ?
-        """,
-        (chat_id,)
-    )
-
-    conn.commit()
-    conn.close()
-
+    conn = get_db(); conn.execute("DELETE FROM chat_state WHERE chat_id=?", (chat_id,)); conn.commit(); conn.close()
 
 # =========================================================
 # TELEGRAM
@@ -492,48 +581,29 @@ def clear_previous_response_id(chat_id):
 
 def send_message(chat_id, text):
     text = str(text or "")
-
-    parts = [
-        text[i:i + 4000]
-        for i in range(
-            0,
-            len(text),
-            4000
-        )
-    ]
-
-    if not parts:
-        parts = [""]
-
+    parts = [text[i:i + 4000] for i in range(0, len(text), 4000)] or [""]
     for part in parts:
-        response = requests.post(
+        r = requests.post(
             f"{TELEGRAM_API}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": part
-            },
-            timeout=30
+            json={"chat_id": chat_id, "text": part},
+            timeout=30,
         )
-
-        response.raise_for_status()
-
+        r.raise_for_status()
 
 # =========================================================
-# ЯНДЕКС КАЛЕНДАРЬ
+# CALENDAR
 # =========================================================
 
 def get_yandex_client():
     return caldav.DAVClient(
         url=YANDEX_CALDAV_URL,
         username=YANDEX_CALENDAR_LOGIN,
-        password=YANDEX_CALENDAR_PASSWORD
+        password=YANDEX_CALENDAR_PASSWORD,
     )
 
 
 def get_yandex_calendars():
-    client = get_yandex_client()
-    principal = client.principal()
-
+    principal = get_yandex_client().principal()
     try:
         return principal.get_calendars()
     except AttributeError:
@@ -542,2558 +612,830 @@ def get_yandex_calendars():
 
 def normalize_calendar_datetime(value):
     if isinstance(value, datetime):
-        dt = value
-
-        if dt.tzinfo is None:
-            dt = dt.replace(
-                tzinfo=CALENDAR_TZ
-            )
-        else:
-            dt = dt.astimezone(
-                CALENDAR_TZ
-            )
-
-        return dt, False
-
+        if value.tzinfo is None:
+            return value.replace(tzinfo=TZ), False
+        return value.astimezone(TZ), False
     if isinstance(value, date):
-        return datetime(
-            value.year,
-            value.month,
-            value.day,
-            tzinfo=CALENDAR_TZ
-        ), True
-
+        return datetime(value.year, value.month, value.day, tzinfo=TZ), True
     return None, False
 
 
 def extract_attendees(component):
     raw = component.get("ATTENDEE")
-
     if not raw:
         return []
-
     if not isinstance(raw, list):
         raw = [raw]
-
-    result = []
-
-    for attendee in raw:
-        try:
-            name = attendee.params.get(
-                "CN",
-                ""
-            )
-        except Exception:
-            name = ""
-
-        try:
-            partstat = attendee.params.get(
-                "PARTSTAT",
-                ""
-            )
-        except Exception:
-            partstat = ""
-
-        result.append({
-            "name": str(name),
-            "value": str(attendee),
-            "partstat": str(partstat)
-        })
-
-    return result
+    out = []
+    for a in raw:
+        try: name = a.params.get("CN", "")
+        except Exception: name = ""
+        try: partstat = a.params.get("PARTSTAT", "")
+        except Exception: partstat = ""
+        out.append({"name": str(name), "value": str(a), "partstat": str(partstat)})
+    return out
 
 
-def extract_event_from_ical(
-    ical_data,
-    calendar_name=""
-):
+def extract_event_from_ical(ical_data, calendar_name=""):
     if not ical_data:
         return []
-
     if isinstance(ical_data, str):
-        ical_data = ical_data.encode(
-            "utf-8"
-        )
-
-    parsed = Calendar.from_ical(
-        ical_data
-    )
-
+        ical_data = ical_data.encode("utf-8")
+    parsed = Calendar.from_ical(ical_data)
     result = []
-
     for component in parsed.walk():
-
         if component.name != "VEVENT":
             continue
-
-        dtstart_property = component.get(
-            "DTSTART"
-        )
-
-        if not dtstart_property:
+        start_prop = component.get("DTSTART")
+        if not start_prop:
             continue
-
-        start, all_day = (
-            normalize_calendar_datetime(
-                dtstart_property.dt
-            )
-        )
-
+        start, all_day = normalize_calendar_datetime(start_prop.dt)
         if start is None:
             continue
-
         end = None
-
-        dtend_property = component.get(
-            "DTEND"
-        )
-
-        if dtend_property:
-            end, _ = (
-                normalize_calendar_datetime(
-                    dtend_property.dt
-                )
-            )
-
+        end_prop = component.get("DTEND")
+        if end_prop:
+            end, _ = normalize_calendar_datetime(end_prop.dt)
         result.append({
-            "uid": str(
-                component.get("UID", "")
-            ),
-            "summary": str(
-                component.get(
-                    "SUMMARY",
-                    "Без названия"
-                )
-            ),
+            "uid": str(component.get("UID", "")),
+            "summary": str(component.get("SUMMARY", "Без названия")),
             "start": start,
             "end": end,
             "all_day": all_day,
-            "location": str(
-                component.get(
-                    "LOCATION",
-                    ""
-                )
-            ),
-            "description": str(
-                component.get(
-                    "DESCRIPTION",
-                    ""
-                )
-            ),
-            "url": str(
-                component.get(
-                    "URL",
-                    ""
-                )
-            ),
+            "location": str(component.get("LOCATION", "")),
+            "description": str(component.get("DESCRIPTION", "")),
+            "url": str(component.get("URL", "")),
             "calendar": calendar_name,
-            "attendees": extract_attendees(
-                component
-            )
+            "attendees": extract_attendees(component),
         })
-
     return result
 
 
-def get_calendar_events(
-    start_dt,
-    end_dt
-):
-    calendars = get_yandex_calendars()
-
+def get_calendar_events(start_dt, end_dt):
     collected = []
-
-    for calendar in calendars:
-
-        calendar_name = (
-            getattr(
-                calendar,
-                "name",
-                None
-            )
-            or "Календарь"
-        )
-
+    for cal in get_yandex_calendars():
+        name = getattr(cal, "name", None) or "Календарь"
         try:
-            events = calendar.date_search(
-                start=start_dt,
-                end=end_dt,
-                expand=True
-            )
+            events = cal.date_search(start=start_dt, end=end_dt, expand=True)
         except TypeError:
-            events = calendar.date_search(
-                start_dt,
-                end_dt,
-                expand=True
-            )
-
-        for event in events:
+            events = cal.date_search(start_dt, end_dt, expand=True)
+        for ev in events:
             try:
-                collected.extend(
-                    extract_event_from_ical(
-                        event.data,
-                        calendar_name
-                    )
-                )
+                collected.extend(extract_event_from_ical(ev.data, name))
             except Exception as e:
-                print(
-                    "Calendar parse error:",
-                    repr(e)
-                )
+                print("Calendar parse error:", repr(e))
 
     unique = {}
-
-    for event in collected:
-
+    for ev in collected:
         key = (
-            event["summary"]
-            .strip()
-            .lower(),
-            event["start"].isoformat()
-            if event["start"]
-            else "",
-            event["end"].isoformat()
-            if event["end"]
-            else ""
+            ev["summary"].strip().lower(),
+            ev["start"].isoformat() if ev["start"] else "",
+            ev["end"].isoformat() if ev["end"] else "",
         )
-
         if key not in unique:
-            unique[key] = event
-            continue
-
-        existing = unique[key]
-
-        for field in [
-            "location",
-            "description",
-            "url"
-        ]:
-            if (
-                not existing[field]
-                and event[field]
-            ):
-                existing[field] = event[field]
-
-        if (
-            not existing["attendees"]
-            and event["attendees"]
-        ):
-            existing["attendees"] = (
-                event["attendees"]
-            )
-
+            unique[key] = ev
+        else:
+            ex = unique[key]
+            for field in ("location", "description", "url"):
+                if not ex[field] and ev[field]:
+                    ex[field] = ev[field]
+            if not ex["attendees"] and ev["attendees"]:
+                ex["attendees"] = ev["attendees"]
     result = list(unique.values())
-
-    result.sort(
-        key=lambda item: item["start"]
-    )
-
+    result.sort(key=lambda x: x["start"])
     return result
 
 
-def format_event(event):
-    start = event["start"]
-    end = event["end"]
-
-    if event["all_day"]:
-        time_text = "весь день"
-
-    elif end:
-        time_text = (
-            f"{start.strftime('%H:%M')}"
-            f"–{end.strftime('%H:%M')}"
-        )
-
+def format_event(ev):
+    if ev["all_day"]:
+        when = "весь день"
+    elif ev["end"]:
+        when = f"{ev['start'].strftime('%H:%M')}–{ev['end'].strftime('%H:%M')}"
     else:
-        time_text = start.strftime(
-            "%H:%M"
-        )
-
-    text = (
-        f"{time_text} — "
-        f"{event['summary']}"
-    )
-
-    if event["location"]:
-        text += (
-            f"\n📍 {event['location']}"
-        )
-
+        when = ev["start"].strftime("%H:%M")
+    text = f"{when} — {ev['summary']}"
+    if ev["location"]:
+        text += f"\n📍 {ev['location']}"
     return text
 
 
-def format_calendar_day(
-    target_date,
-    title
-):
-    start_dt = datetime(
-        target_date.year,
-        target_date.month,
-        target_date.day,
-        tzinfo=CALENDAR_TZ
-    )
-
-    events = get_calendar_events(
-        start_dt,
-        start_dt + timedelta(days=1)
-    )
-
+def format_calendar_day(target_date, title):
+    start = datetime(target_date.year, target_date.month, target_date.day, tzinfo=TZ)
+    events = get_calendar_events(start, start + timedelta(days=1))
     if not events:
-        return (
-            f"{title}\n\n"
-            "В календаре событий нет."
-        )
-
-    return (
-        title
-        + "\n\n"
-        + "\n\n".join(
-            format_event(event)
-            for event in events
-        )
-    )
+        return f"{title}\n\nВ календаре событий нет."
+    return title + "\n\n" + "\n\n".join(format_event(e) for e in events)
 
 
-def format_calendar_period(
-    start_date,
-    days
-):
-    start_dt = datetime(
-        start_date.year,
-        start_date.month,
-        start_date.day,
-        tzinfo=CALENDAR_TZ
-    )
-
-    events = get_calendar_events(
-        start_dt,
-        start_dt + timedelta(days=days)
-    )
-
+def format_calendar_period(start_date, days):
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=TZ)
+    events = get_calendar_events(start, start + timedelta(days=days))
     if not events:
-        return (
-            "На этот период "
-            "в календаре событий нет."
-        )
-
+        return "На этот период в календаре событий нет."
     grouped = {}
-
-    for event in events:
-        event_date = (
-            event["start"]
-            .astimezone(CALENDAR_TZ)
-            .date()
-        )
-
-        grouped.setdefault(
-            event_date,
-            []
-        ).append(event)
-
-    weekdays = {
-        0: "Пн",
-        1: "Вт",
-        2: "Ср",
-        3: "Чт",
-        4: "Пт",
-        5: "Сб",
-        6: "Вс"
-    }
-
+    for e in events:
+        d = e["start"].astimezone(TZ).date()
+        grouped.setdefault(d, []).append(e)
+    wd = {0:"Пн",1:"Вт",2:"Ср",3:"Чт",4:"Пт",5:"Сб",6:"Вс"}
     lines = []
-
-    for event_date in sorted(
-        grouped.keys()
-    ):
-        lines.append(
-            f"{weekdays[event_date.weekday()]}, "
-            f"{event_date.strftime('%d.%m')}"
-        )
-
-        for event in grouped[event_date]:
-            lines.append(
-                format_event(event)
-            )
-
+    for d in sorted(grouped):
+        lines.append(f"{wd[d.weekday()]}, {d.strftime('%d.%m')}")
+        lines.extend(format_event(e) for e in grouped[d])
         lines.append("")
-
     return "\n".join(lines).strip()
 
 
-def calendar_context(
-    start_date,
-    days=1
-):
-    start_dt = datetime(
-        start_date.year,
-        start_date.month,
-        start_date.day,
-        tzinfo=CALENDAR_TZ
-    )
-
-    events = get_calendar_events(
-        start_dt,
-        start_dt + timedelta(days=days)
-    )
-
+def calendar_context(start_date, days=1):
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=TZ)
+    events = get_calendar_events(start, start + timedelta(days=days))
     lines = ["КАЛЕНДАРЬ:"]
-
     if not events:
-        lines.append("Событий нет.")
-        return "\n".join(lines)
-
-    for index, event in enumerate(
-        events,
-        start=1
-    ):
-        start = event["start"]
-        end = event["end"]
-
-        if event["all_day"]:
-            when = (
-                start.strftime("%d.%m.%Y")
-                + " весь день"
-            )
-
-        elif end:
-            when = (
-                start.strftime(
-                    "%d.%m.%Y %H:%M"
-                )
-                + "–"
-                + end.strftime("%H:%M")
-            )
-
+        return "КАЛЕНДАРЬ:\nСобытий нет."
+    for i, e in enumerate(events, 1):
+        if e["all_day"]:
+            when = e["start"].strftime("%d.%m.%Y") + " весь день"
+        elif e["end"]:
+            when = e["start"].strftime("%d.%m.%Y %H:%M") + "–" + e["end"].strftime("%H:%M")
         else:
-            when = start.strftime(
-                "%d.%m.%Y %H:%M"
-            )
-
+            when = e["start"].strftime("%d.%m.%Y %H:%M")
+        desc = e["description"].strip()
+        if len(desc) > 1800:
+            desc = desc[:1800] + "..."
         lines.extend([
             "",
-            f"Событие {index}",
-            "Название: " + event["summary"],
-            "Время: " + when,
-            (
-                "Место/адрес: "
-                + (
-                    event["location"]
-                    or "не указано"
-                )
-            )
+            f"Событие {i}",
+            f"Название: {e['summary']}",
+            f"Время: {when}",
+            f"Место/адрес: {e['location'] or 'не указано'}",
+            f"Описание: {desc or 'не указано'}",
         ])
-
-        description = (
-            event["description"].strip()
-        )
-
-        if len(description) > 2500:
-            description = (
-                description[:2500]
-                + "..."
-            )
-
-        lines.append(
-            "Описание: "
-            + (
-                description
-                or "не указано"
-            )
-        )
-
-        attendees = event.get(
-            "attendees",
-            []
-        )
-
-        if attendees:
-            lines.append(
-                "Участники: "
-                + "; ".join(
-                    (
-                        f"{a['name'] or a['value']} "
-                        f"(статус: "
-                        f"{a['partstat'] or 'не указан'})"
-                    )
-                    for a in attendees
-                )
-            )
-
+        if e["attendees"]:
+            lines.append("Участники: " + "; ".join(
+                f"{a['name'] or a['value']} (статус: {a['partstat'] or 'не указан'})" for a in e["attendees"]
+            ))
     return "\n".join(lines)
 
-
 # =========================================================
-# ЯНДЕКС ПОЧТА
+# MAIL
 # =========================================================
 
 def decode_mime_header(value):
     if not value:
         return ""
-
     try:
-        return str(
-            make_header(
-                decode_header(value)
-            )
-        )
+        return str(make_header(decode_header(value)))
     except Exception:
         return str(value)
 
 
 def get_mail_connection():
-    client = IMAPClient(
-        YANDEX_IMAP_HOST,
-        port=YANDEX_IMAP_PORT,
-        ssl=True
-    )
-
-    client.login(
-        YANDEX_MAIL_LOGIN,
-        YANDEX_MAIL_PASSWORD
-    )
-
+    client = IMAPClient(YANDEX_IMAP_HOST, port=YANDEX_IMAP_PORT, ssl=True)
+    client.login(YANDEX_MAIL_LOGIN, YANDEX_MAIL_PASSWORD)
     return client
 
 
 def clean_html_text(value):
     if not value:
         return ""
-
-    value = re.sub(
-        r"(?is)<(script|style).*?>.*?</\1>",
-        " ",
-        value
-    )
-
-    value = re.sub(
-        r"(?s)<[^>]+>",
-        " ",
-        value
-    )
-
+    value = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", value)
+    value = re.sub(r"(?s)<[^>]+>", " ", value)
     value = html.unescape(value)
-
-    value = re.sub(
-        r"[ \t]+",
-        " ",
-        value
-    )
-
-    return value.strip()
+    return re.sub(r"[ \t]+", " ", value).strip()
 
 
 def decode_part_payload(part):
     try:
-        payload = part.get_payload(
-            decode=True
-        )
-
+        payload = part.get_payload(decode=True)
         if payload is None:
             return ""
-
-        charset = (
-            part.get_content_charset()
-            or "utf-8"
-        )
-
+        charset = part.get_content_charset() or "utf-8"
         try:
-            return payload.decode(
-                charset,
-                errors="replace"
-            )
+            return payload.decode(charset, errors="replace")
         except LookupError:
-            return payload.decode(
-                "utf-8",
-                errors="replace"
-            )
-
+            return payload.decode("utf-8", errors="replace")
     except Exception:
         return ""
 
 
-def extract_mail_body(message):
-    plain_parts = []
-    html_parts = []
-
-    if message.is_multipart():
-
-        for part in message.walk():
-
-            content_type = (
-                part.get_content_type()
-            )
-
-            disposition = str(
-                part.get(
-                    "Content-Disposition",
-                    ""
-                )
-            ).lower()
-
+def extract_mail_body(msg):
+    plain, rich = [], []
+    if msg.is_multipart():
+        for part in msg.walk():
+            disposition = str(part.get("Content-Disposition", "")).lower()
             if "attachment" in disposition:
                 continue
-
-            if content_type == "text/plain":
-
-                value = decode_part_payload(
-                    part
-                )
-
-                if value:
-                    plain_parts.append(value)
-
-            elif content_type == "text/html":
-
-                value = decode_part_payload(
-                    part
-                )
-
-                if value:
-                    html_parts.append(
-                        clean_html_text(value)
-                    )
-
+            ctype = part.get_content_type()
+            value = decode_part_payload(part)
+            if ctype == "text/plain" and value:
+                plain.append(value)
+            elif ctype == "text/html" and value:
+                rich.append(clean_html_text(value))
     else:
-        value = decode_part_payload(
-            message
-        )
-
-        if (
-            message.get_content_type()
-            == "text/html"
-        ):
-            html_parts.append(
-                clean_html_text(value)
-            )
-
+        value = decode_part_payload(msg)
+        if msg.get_content_type() == "text/html":
+            rich.append(clean_html_text(value))
         else:
-            plain_parts.append(value)
-
-    if plain_parts:
-        body = "\n".join(plain_parts)
-
-    elif html_parts:
-        body = "\n".join(html_parts)
-
-    else:
-        body = ""
-
-    body = body.strip()
-
-    if len(body) > 10000:
-        body = (
-            body[:10000]
-            + "\n...[письмо сокращено]"
-        )
-
-    return body
+            plain.append(value)
+    body = "\n".join(plain or rich).strip()
+    return body[:10000] + ("\n...[письмо сокращено]" if len(body) > 10000 else "")
 
 
-def get_attachment_names(message):
-    names = []
-
-    for part in message.walk():
-
+def get_attachment_names(msg):
+    result = []
+    for part in msg.walk():
         filename = part.get_filename()
-
         if filename:
-            names.append(
-                decode_mime_header(
-                    filename
-                )
-            )
-
-    return names
+            result.append(decode_mime_header(filename))
+    return result
 
 
 def parse_email_date(value):
     if not value:
         return None
-
     try:
-        dt = parsedate_to_datetime(
-            value
-        )
-
+        dt = parsedate_to_datetime(value)
         if not dt:
             return None
-
         if dt.tzinfo is None:
-            dt = dt.replace(
-                tzinfo=CALENDAR_TZ
-            )
-        else:
-            dt = dt.astimezone(
-                CALENDAR_TZ
-            )
-
-        return dt
-
+            return dt.replace(tzinfo=TZ)
+        return dt.astimezone(TZ)
     except Exception:
         return None
 
 
-def parse_full_email(
-    raw_email,
-    folder_name,
-    uid
-):
-    message = email.message_from_bytes(
-        raw_email
-    )
-
+def parse_full_email(raw_email, folder_name, uid):
+    msg = email.message_from_bytes(raw_email)
     return {
         "uid": uid,
         "folder": str(folder_name),
-        "message_id": str(
-            message.get(
-                "Message-ID",
-                ""
-            )
-        ).strip(),
-        "subject": decode_mime_header(
-            message.get(
-                "Subject",
-                ""
-            )
-        ),
-        "from": decode_mime_header(
-            message.get(
-                "From",
-                ""
-            )
-        ),
-        "to": decode_mime_header(
-            message.get(
-                "To",
-                ""
-            )
-        ),
-        "date": parse_email_date(
-            message.get(
-                "Date",
-                ""
-            )
-        ),
-        "body": extract_mail_body(
-            message
-        ),
-        "attachments": (
-            get_attachment_names(
-                message
-            )
-        )
+        "message_id": str(msg.get("Message-ID", "")).strip(),
+        "subject": decode_mime_header(msg.get("Subject", "")),
+        "from": decode_mime_header(msg.get("From", "")),
+        "to": decode_mime_header(msg.get("To", "")),
+        "date": parse_email_date(msg.get("Date", "")),
+        "body": extract_mail_body(msg),
+        "attachments": get_attachment_names(msg),
     }
 
-
-# =========================================================
-# ПОИСКОВАЯ НОРМАЛИЗАЦИЯ
-# =========================================================
-
 RUS_TO_LAT = {
-    "а": "a",
-    "б": "b",
-    "в": "v",
-    "г": "g",
-    "д": "d",
-    "е": "e",
-    "ё": "e",
-    "ж": "zh",
-    "з": "z",
-    "и": "i",
-    "й": "y",
-    "к": "k",
-    "л": "l",
-    "м": "m",
-    "н": "n",
-    "о": "o",
-    "п": "p",
-    "р": "r",
-    "с": "s",
-    "т": "t",
-    "у": "u",
-    "ф": "f",
-    "х": "kh",
-    "ц": "ts",
-    "ч": "ch",
-    "ш": "sh",
-    "щ": "sch",
-    "ъ": "",
-    "ы": "y",
-    "ь": "",
-    "э": "e",
-    "ю": "yu",
-    "я": "ya"
+    "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"e","ж":"zh","з":"z",
+    "и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r",
+    "с":"s","т":"t","у":"u","ф":"f","х":"kh","ц":"ts","ч":"ch","ш":"sh","щ":"sch",
+    "ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya"
 }
+MAIL_STOP_WORDS = {"найди","найти","письмо","письма","переписку","переписка","почта","почте","поищи","про","от","по","с","мне","мои","мою","все","всё","что","было","есть","посмотри","покажи"}
+SKIP_MAIL_FOLDERS = {"drafts","drafts|template","outbox","spam","trash","черновики","спам","удаленные","удалённые"}
+BLOCKED_MAIL_DOMAINS = {"calendar.yandex.ru", "mailer.yandex.ru"}
+BLOCKED_MAIL_LOCALPARTS = {"noreply","no-reply","mailer-daemon","postmaster","notifications","notification"}
 
 
-MAIL_STOP_WORDS = {
-    "найди",
-    "найти",
-    "письмо",
-    "письма",
-    "переписку",
-    "переписка",
-    "почта",
-    "почте",
-    "поищи",
-    "про",
-    "от",
-    "по",
-    "с",
-    "мне",
-    "мои",
-    "мою",
-    "все",
-    "всё",
-    "что",
-    "было",
-    "есть",
-    "посмотри",
-    "покажи"
-}
-
-
-SKIP_MAIL_FOLDERS = {
-    "drafts",
-    "drafts|template",
-    "outbox",
-    "spam",
-    "trash",
-    "черновики",
-    "спам",
-    "удаленные",
-    "удалённые"
-}
-
-
-BLOCKED_MAIL_DOMAINS = {
-    "calendar.yandex.ru",
-    "mailer.yandex.ru"
-}
-
-
-BLOCKED_MAIL_LOCALPARTS = {
-    "noreply",
-    "no-reply",
-    "mailer-daemon",
-    "postmaster",
-    "notifications",
-    "notification"
-}
-
-
-def normalize_search_text(value):
-    return re.sub(
-        r"\s+",
-        " ",
-        str(value)
-        .lower()
-        .replace("ё", "е")
-    ).strip()
+def normalize_text(value):
+    return re.sub(r"\s+", " ", str(value).lower().replace("ё", "е")).strip()
 
 
 def transliterate_ru(value):
-    return "".join(
-        RUS_TO_LAT.get(
-            char,
-            char
-        )
-        for char in normalize_search_text(
-            value
-        )
-    )
+    return "".join(RUS_TO_LAT.get(c, c) for c in normalize_text(value))
 
 
 def russian_stem(word):
-    word = normalize_search_text(
-        word
-    )
-
+    word = normalize_text(word)
     candidates = {word}
-
-    endings = [
-        "ами",
-        "ями",
-        "ого",
-        "ему",
-        "ому",
-        "ом",
-        "ем",
-        "ах",
-        "ях",
-        "ов",
-        "ев",
-        "а",
-        "я",
-        "у",
-        "ю",
-        "е",
-        "ы",
-        "и"
-    ]
-
-    for ending in endings:
-
-        if (
-            word.endswith(ending)
-            and len(word) - len(ending) >= 4
-        ):
-            candidates.add(
-                word[:-len(ending)]
-            )
-
-    return min(
-        candidates,
-        key=len
-    )
+    for ending in ["ами","ями","ого","ему","ому","ом","ем","ах","ях","ов","ев","а","я","у","ю","е","ы","и"]:
+        if word.endswith(ending) and len(word) - len(ending) >= 4:
+            candidates.add(word[:-len(ending)])
+    return min(candidates, key=len)
 
 
 def extract_query_alias(query):
-    words = re.findall(
-        r"[а-яёa-z]+",
-        normalize_search_text(
-            query
-        ),
-        flags=re.IGNORECASE
-    )
-
-    useful = [
-        word
-        for word in words
-        if (
-            word not in MAIL_STOP_WORDS
-            and len(word) >= 4
-        )
-    ]
-
-    if not useful:
-        return ""
-
-    return russian_stem(
-        useful[0]
-    )
+    words = re.findall(r"[а-яёa-z]+", normalize_text(query), flags=re.I)
+    useful = [w for w in words if w not in MAIL_STOP_WORDS and len(w) >= 4]
+    return russian_stem(useful[0]) if useful else ""
 
 
 def extract_email_addresses(value):
-    if not value:
-        return []
-
-    return [
-        addr.lower()
-        for name, addr in getaddresses(
-            [value]
-        )
-        if addr and "@" in addr
-    ]
+    return [addr.lower() for _, addr in getaddresses([value]) if addr and "@" in addr]
 
 
 def is_system_email(address):
-    address = (
-        str(address)
-        .strip()
-        .lower()
-    )
-
+    address = str(address).strip().lower()
     if "@" not in address:
         return True
-
-    local_part, domain = (
-        address.rsplit("@", 1)
+    local, domain = address.rsplit("@", 1)
+    return (
+        domain in BLOCKED_MAIL_DOMAINS
+        or local in BLOCKED_MAIL_LOCALPARTS
+        or local.startswith("noreply")
+        or local.startswith("no-reply")
+        or local.startswith("mailer-daemon")
     )
 
-    if domain in BLOCKED_MAIL_DOMAINS:
-        return True
 
-    if local_part in BLOCKED_MAIL_LOCALPARTS:
-        return True
-
-    if local_part.startswith(
-        "noreply"
-    ):
-        return True
-
-    if local_part.startswith(
-        "no-reply"
-    ):
-        return True
-
-    if local_part.startswith(
-        "mailer-daemon"
-    ):
-        return True
-
-    return False
-
-
-# =========================================================
-# ПОЧТОВЫЕ КОНТАКТЫ
-# =========================================================
-
-def save_verified_mail_contact(
-    chat_id,
-    alias,
-    email_address,
-    display_name
-):
-    alias = normalize_search_text(alias)
-    email_address = (
-        email_address.strip().lower()
-    )
-
-    if (
-        not alias
-        or not email_address
-        or is_system_email(
-            email_address
-        )
-    ):
+def save_verified_mail_contact(chat_id, alias, email_address, display_name):
+    alias = normalize_text(alias)
+    email_address = email_address.strip().lower()
+    if not alias or not email_address or is_system_email(email_address):
         return False
-
     conn = get_db()
-
-    conn.execute(
-        """
-        DELETE FROM mail_contacts
-        WHERE chat_id = ?
-        AND alias = ?
-        AND email != ?
-        """,
-        (
-            chat_id,
-            alias,
-            email_address
-        )
-    )
-
-    conn.execute(
-        """
-        INSERT INTO mail_contacts (
-            chat_id,
-            alias,
-            email,
-            display_name,
-            created_at,
-            verified,
-            source
-        )
-        VALUES (?, ?, ?, ?, ?, 1, 'matched-name')
-
-        ON CONFLICT(chat_id, alias, email)
-        DO UPDATE SET
-            display_name = excluded.display_name,
-            verified = 1,
-            source = 'matched-name'
-        """,
-        (
-            chat_id,
-            alias,
-            email_address,
-            display_name,
-            datetime.now().isoformat(
-                timespec="seconds"
-            )
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-    print(
-        "Verified mail contact saved:",
-        repr(alias),
-        "->",
-        repr(email_address)
-    )
-
+    conn.execute("DELETE FROM mail_contacts WHERE chat_id=? AND alias=? AND email!=?", (chat_id, alias, email_address))
+    conn.execute("""
+        INSERT INTO mail_contacts(chat_id,alias,email,display_name,created_at,verified,source)
+        VALUES (?,?,?,?,?,1,'matched-name')
+        ON CONFLICT(chat_id,alias,email) DO UPDATE SET display_name=excluded.display_name,verified=1,source='matched-name'
+    """, (chat_id, alias, email_address, display_name, datetime.now(TZ).isoformat(timespec="seconds")))
+    conn.commit(); conn.close()
+    print("Verified mail contact saved:", repr(alias), "->", repr(email_address))
     return True
 
 
-def get_verified_mail_contacts(
-    chat_id,
-    query
-):
-    alias = extract_query_alias(
-        query
-    )
-
+def get_verified_mail_contacts(chat_id, query):
+    alias = extract_query_alias(query)
     if not alias:
         return []
-
-    alias_lat = transliterate_ru(
-        alias
-    )
-
+    alias_lat = transliterate_ru(alias)
     conn = get_db()
-
-    rows = conn.execute(
-        """
-        SELECT alias, email, display_name
-        FROM mail_contacts
-        WHERE chat_id = ?
-        AND verified = 1
-        """,
-        (chat_id,)
-    ).fetchall()
-
+    rows = conn.execute("SELECT alias,email,display_name FROM mail_contacts WHERE chat_id=? AND verified=1", (chat_id,)).fetchall()
     conn.close()
-
-    result = []
-
-    for row in rows:
-
-        if is_system_email(
-            row["email"]
-        ):
-            continue
-
-        saved_alias = normalize_search_text(
-            row["alias"]
-        )
-
-        if (
-            saved_alias == alias
-            or transliterate_ru(
-                saved_alias
-            ) == alias_lat
-        ):
-            result.append(row)
-
-    return result
+    return [r for r in rows if not is_system_email(r["email"]) and (normalize_text(r["alias"]) == alias or transliterate_ru(r["alias"]) == alias_lat)]
 
 
-def list_verified_mail_contacts(
-    chat_id
-):
+def list_verified_mail_contacts(chat_id):
     conn = get_db()
-
-    rows = conn.execute(
-        """
-        SELECT alias, email, display_name
-        FROM mail_contacts
-        WHERE chat_id = ?
-        AND verified = 1
-        ORDER BY alias
-        """,
-        (chat_id,)
-    ).fetchall()
-
+    rows = conn.execute("SELECT alias,email,display_name FROM mail_contacts WHERE chat_id=? AND verified=1 ORDER BY alias", (chat_id,)).fetchall()
     conn.close()
-
-    return [
-        row
-        for row in rows
-        if not is_system_email(
-            row["email"]
-        )
-    ]
+    return [r for r in rows if not is_system_email(r["email"])]
 
 
-def forget_mail_contact(
-    chat_id,
-    query
-):
-    alias = extract_query_alias(
-        query
-    )
-
-    if not alias:
-        alias = normalize_search_text(
-            query
-        )
-
+def forget_mail_contact(chat_id, query):
+    alias = extract_query_alias(query) or normalize_text(query)
     conn = get_db()
-
-    cursor = conn.execute(
-        """
-        DELETE FROM mail_contacts
-        WHERE chat_id = ?
-        AND alias = ?
-        """,
-        (
-            chat_id,
-            alias
-        )
-    )
-
-    count = cursor.rowcount
-
-    conn.commit()
-    conn.close()
-
-    return count
+    cur = conn.execute("DELETE FROM mail_contacts WHERE chat_id=? AND alias=?", (chat_id, alias))
+    count = cur.rowcount
+    conn.commit(); conn.close(); return count
 
 
-def contact_match_score(
-    alias,
-    display_name,
-    email_address
-):
-    """
-    Оцениваем, насколько адрес действительно
-    похож на человека из запроса.
-
-    Эльдар:
-    Eldar Gincharadze <eldar.gincharadze@ddb.ru>
-    -> высокий score
-
-    Яндекс Календарь <info@calendar.yandex.ru>
-    -> сразу запрещён.
-    """
-
-    if is_system_email(
-        email_address
-    ):
+def contact_match_score(alias, display_name, email_address):
+    if is_system_email(email_address):
         return -100
-
-    alias = normalize_search_text(
-        alias
-    )
-
-    alias_lat = transliterate_ru(
-        alias
-    )
-
-    display = normalize_search_text(
-        display_name
-    )
-
-    display_lat = transliterate_ru(
-        display
-    )
-
-    local_part = (
-        email_address
-        .split("@", 1)[0]
-        .lower()
-    )
-
+    alias = normalize_text(alias)
+    alias_lat = transliterate_ru(alias)
+    display = normalize_text(display_name)
+    display_lat = transliterate_ru(display)
+    local = email_address.split("@", 1)[0].lower()
     score = 0
-
-    if alias and alias in display:
-        score += 20
-
-    if (
-        alias_lat
-        and alias_lat in display_lat
-    ):
-        score += 15
-
-    if (
-        alias_lat
-        and alias_lat in local_part
-    ):
-        score += 12
-
-    if display:
-        score += 1
-
+    if alias and alias in display: score += 20
+    if alias_lat and alias_lat in display_lat: score += 15
+    if alias_lat and alias_lat in local: score += 12
+    if display: score += 1
     return score
 
 
-def remember_best_contact_from_messages(
-    chat_id,
-    query,
-    messages
-):
-    """
-    За один запрос сохраняем только ОДИН
-    наиболее вероятный адрес человека.
-    """
-
-    alias = extract_query_alias(
-        query
-    )
-
+def remember_best_contact_from_messages(chat_id, query, messages):
+    alias = extract_query_alias(query)
     if not alias:
         return
-
     candidates = {}
-
     for item in messages:
-
-        for header_name in [
-            "from",
-            "to"
-        ]:
-
-            raw_value = item.get(
-                header_name,
-                ""
-            )
-
-            for (
-                display_name,
-                email_address
-            ) in getaddresses(
-                [raw_value]
-            ):
-
-                email_address = (
-                    email_address
-                    .strip()
-                    .lower()
-                )
-
-                if not email_address:
+        for header in ("from", "to"):
+            raw = item.get(header, "")
+            for display_name, addr in getaddresses([raw]):
+                addr = addr.strip().lower()
+                if not addr or addr == YANDEX_MAIL_LOGIN.lower() or is_system_email(addr):
                     continue
-
-                if (
-                    email_address
-                    == YANDEX_MAIL_LOGIN.lower()
-                ):
-                    continue
-
-                if is_system_email(
-                    email_address
-                ):
-                    continue
-
-                decoded_name = (
-                    decode_mime_header(
-                        display_name
-                    )
-                )
-
-                score = contact_match_score(
-                    alias,
-                    decoded_name,
-                    email_address
-                )
-
-                existing = candidates.get(
-                    email_address
-                )
-
-                if (
-                    existing is None
-                    or score
-                    > existing["score"]
-                ):
-                    candidates[
-                        email_address
-                    ] = {
-                        "score": score,
-                        "display_name": (
-                            decoded_name
-                            or raw_value
-                        )
-                    }
-
+                name = decode_mime_header(display_name)
+                score = contact_match_score(alias, name, addr)
+                if addr not in candidates or score > candidates[addr]["score"]:
+                    candidates[addr] = {"score": score, "display_name": name or raw}
     if not candidates:
         return
+    best_email, best = max(candidates.items(), key=lambda kv: kv[1]["score"])
+    print("Best contact candidate:", repr(alias), "->", repr(best_email), "score:", best["score"])
+    if best["score"] >= 10:
+        save_verified_mail_contact(chat_id, alias, best_email, best["display_name"])
 
-    best_email, best_data = max(
-        candidates.items(),
-        key=lambda item: (
-            item[1]["score"]
-        )
-    )
-
-    print(
-        "Best contact candidate:",
-        repr(alias),
-        "->",
-        repr(best_email),
-        "score:",
-        best_data["score"]
-    )
-
-    # Не сохраняем сомнительное совпадение.
-    if best_data["score"] < 10:
-        print(
-            "Contact candidate rejected:"
-            " score too low."
-        )
-        return
-
-    save_verified_mail_contact(
-        chat_id,
-        alias,
-        best_email,
-        best_data["display_name"]
-    )
-
-
-# =========================================================
-# ПАПКИ
-# =========================================================
 
 def get_useful_mail_folders(client):
     result = []
-
-    for (
-        flags,
-        delimiter,
-        folder_name
-    ) in client.list_folders():
-
-        flags_text = {
-            (
-                flag.decode(
-                    errors="ignore"
-                )
-                if isinstance(flag, bytes)
-                else str(flag)
-            ).lower()
-            for flag in flags
-        }
-
+    for flags, delimiter, folder_name in client.list_folders():
+        flags_text = {(f.decode(errors="ignore") if isinstance(f, bytes) else str(f)).lower() for f in flags}
         if "\\noselect" in flags_text:
             continue
-
-        folder_text = (
-            str(folder_name)
-            .strip()
-        )
-
-        if (
-            folder_text.lower()
-            in SKIP_MAIL_FOLDERS
-        ):
+        if str(folder_name).strip().lower() in SKIP_MAIL_FOLDERS:
             continue
-
         result.append(folder_name)
-
     def priority(folder):
         value = str(folder).lower()
-
-        if value == "inbox":
-            return 0
-
-        if value == "sent":
-            return 1
-
-        if value == "archive":
-            return 2
-
-        return 3
-
-    result.sort(
-        key=priority
-    )
-
+        return 0 if value == "inbox" else 1 if value == "sent" else 2 if value == "archive" else 3
+    result.sort(key=priority)
     return result
 
 
-# =========================================================
-# ПОИСК
-# =========================================================
-
-def build_fast_search_terms(
-    chat_id,
-    query
-):
-    exact_emails = (
-        extract_email_addresses(
-            query
-        )
-    )
-
-    if exact_emails:
-        return [
-            exact_emails[0]
-        ]
-
-    known = get_verified_mail_contacts(
-        chat_id,
-        query
-    )
-
+def build_fast_search_terms(chat_id, query):
+    exact = extract_email_addresses(query)
+    if exact:
+        return [exact[0]]
+    known = get_verified_mail_contacts(chat_id, query)
     if known:
-        email_address = known[0][
-            "email"
-        ]
-
-        print(
-            "Using VERIFIED cached contact:",
-            email_address
-        )
-
-        return [
-            email_address
-        ]
-
-    words = re.findall(
-        r"[a-zа-яё0-9._+-]+",
-        normalize_search_text(
-            query
-        ),
-        flags=re.IGNORECASE
-    )
-
-    useful = [
-        word
-        for word in words
-        if (
-            word not in MAIL_STOP_WORDS
-            and len(word) >= 3
-        )
-    ]
-
+        print("Using VERIFIED cached contact:", known[0]["email"])
+        return [known[0]["email"]]
+    words = re.findall(r"[a-zа-яё0-9._+-]+", normalize_text(query), flags=re.I)
+    useful = [w for w in words if w not in MAIL_STOP_WORDS and len(w) >= 3]
     if not useful:
         return []
-
-    main_word = max(
-        useful,
-        key=len
-    )
-
-    stem = russian_stem(
-        main_word
-    )
-
+    stem = russian_stem(max(useful, key=len))
     result = [stem]
-
-    translit = transliterate_ru(
-        stem
-    )
-
-    if (
-        translit
-        and translit != stem
-    ):
-        result.append(translit)
-
+    lat = transliterate_ru(stem)
+    if lat and lat != stem:
+        result.append(lat)
     return result[:2]
 
 
-def search_headers_only(
-    client,
-    terms
-):
+def search_headers_only(client, terms):
     found = set()
-
     for term in terms:
-
-        # Если уже знаем точный email,
-        # SUBJECT проверять нет смысла.
-        if "@" in term:
-            fields = [
-                "FROM",
-                "TO"
-            ]
-        else:
-            fields = [
-                "FROM",
-                "TO",
-                "SUBJECT"
-            ]
-
+        fields = ["FROM", "TO"] if "@" in term else ["FROM", "TO", "SUBJECT"]
         for field in fields:
-
             try:
-                uids = client.search(
-                    [
-                        field,
-                        term
-                    ],
-                    charset="UTF-8"
-                )
-
-                found.update(uids)
-
+                found.update(client.search([field, term], charset="UTF-8"))
             except Exception as e:
-                print(
-                    "IMAP search failed:",
-                    field,
-                    repr(term),
-                    repr(e)
-                )
-
+                print("IMAP search failed:", field, repr(term), repr(e))
     return list(found)
 
 
-def search_text_fallback(
-    client,
-    terms
-):
+def search_text_fallback(client, terms):
     found = set()
-
     for term in terms:
-
         try:
-            uids = client.search(
-                [
-                    "TEXT",
-                    term
-                ],
-                charset="UTF-8"
-            )
-
-            found.update(uids)
-
+            found.update(client.search(["TEXT", term], charset="UTF-8"))
         except Exception as e:
-            print(
-                "IMAP TEXT failed:",
-                repr(term),
-                repr(e)
-            )
-
+            print("IMAP TEXT failed:", repr(term), repr(e))
     return list(found)
 
 
-def fetch_messages(
-    client,
-    folder_name,
-    uids,
-    max_count=25
-):
+def fetch_messages(client, folder_name, uids, max_count=25):
     if not uids:
         return []
-
-    selected = sorted(
-        uids,
-        reverse=True
-    )[:max_count]
-
-    fetched = client.fetch(
-        selected,
-        ["RFC822"]
-    )
-
+    selected = sorted(uids, reverse=True)[:max_count]
+    fetched = client.fetch(selected, ["RFC822"])
     result = []
-
     for uid in selected:
-
         values = fetched.get(uid)
-
         if not values:
             continue
-
-        raw_email = (
-            values.get(b"RFC822")
-            or values.get("RFC822")
-        )
-
-        if not raw_email:
-            continue
-
-        result.append(
-            parse_full_email(
-                raw_email,
-                folder_name,
-                uid
-            )
-        )
-
+        raw = values.get(b"RFC822") or values.get("RFC822")
+        if raw:
+            result.append(parse_full_email(raw, folder_name, uid))
     return result
 
 
-def relevance_score(
-    item,
-    terms
-):
-    subject = normalize_search_text(
-        item["subject"]
-    )
-
-    sender = normalize_search_text(
-        item["from"]
-    )
-
-    recipient = normalize_search_text(
-        item["to"]
-    )
-
-    body = normalize_search_text(
-        item["body"]
-    )
-
-    score = 0
-    matched = []
-
+def relevance_score(item, terms):
+    subject, sender, recipient, body = map(normalize_text, [item["subject"], item["from"], item["to"], item["body"]])
+    score, matched = 0, []
     for term in terms:
-
-        term_n = normalize_search_text(
-            term
-        )
-
-        part_score = 0
-
-        if term_n in sender:
-            part_score += 10
-
-        if term_n in recipient:
-            part_score += 7
-
-        if term_n in subject:
-            part_score += 8
-
-        if term_n in body:
-            part_score += 2
-
-        if part_score:
-            score += part_score
-            matched.append(term)
-
-    item["matched_terms"] = sorted(
-        set(matched)
-    )
-
+        t = normalize_text(term)
+        part = (10 if t in sender else 0) + (7 if t in recipient else 0) + (8 if t in subject else 0) + (2 if t in body else 0)
+        if part:
+            score += part; matched.append(term)
+    item["matched_terms"] = sorted(set(matched))
     return score
 
 
-def search_mail_fast(
-    chat_id,
-    query,
-    result_limit=15
-):
-    terms = build_fast_search_terms(
-        chat_id,
-        query
-    )
-
-    print(
-        "Fast mail search terms:",
-        terms
-    )
-
+def search_mail_fast(chat_id, query, result_limit=15):
+    terms = build_fast_search_terms(chat_id, query)
+    print("Fast mail search terms:", terms)
     if not terms:
         return []
-
     client = get_mail_connection()
-
     all_results = []
-
     try:
-        folders = (
-            get_useful_mail_folders(
-                client
-            )
-        )
-
-        print(
-            "Useful mail folders:",
-            folders
-        )
-
-        # -----------------------------------------
-        # ПРОХОД 1 — ЗАГОЛОВКИ
-        # -----------------------------------------
-
-        for folder_name in folders:
-
+        folders = get_useful_mail_folders(client)
+        print("Useful mail folders:", folders)
+        for folder in folders:
             started = time.time()
-
             try:
-                client.select_folder(
-                    folder_name,
-                    readonly=True
-                )
-
-                uids = search_headers_only(
-                    client,
-                    terms
-                )
-
-                elapsed = (
-                    time.time()
-                    - started
-                )
-
-                print(
-                    "Header search folder:",
-                    repr(folder_name),
-                    "uids:",
-                    len(uids),
-                    "time:",
-                    round(elapsed, 2),
-                    "sec"
-                )
-
-                if not uids:
-                    continue
-
-                messages = fetch_messages(
-                    client,
-                    folder_name,
-                    uids
-                )
-
-                for item in messages:
-
-                    item["score"] = (
-                        relevance_score(
-                            item,
-                            terms
-                        )
-                    )
-
+                client.select_folder(folder, readonly=True)
+                uids = search_headers_only(client, terms)
+                print("Header search folder:", repr(folder), "uids:", len(uids), "time:", round(time.time()-started,2), "sec")
+                for item in fetch_messages(client, folder, uids):
+                    item["score"] = relevance_score(item, terms)
                     if item["score"] > 0:
-                        all_results.append(
-                            item
-                        )
-
+                        all_results.append(item)
             except Exception as e:
-                print(
-                    "Folder search error:",
-                    repr(folder_name),
-                    repr(e)
-                )
-
-        # -----------------------------------------
-        # ПРОХОД 2 — TEXT ТОЛЬКО ЕСЛИ 0
-        # -----------------------------------------
+                print("Folder search error:", repr(folder), repr(e))
 
         if not all_results:
-
-            print(
-                "No header matches. "
-                "Starting TEXT fallback."
-            )
-
-            for folder_name in folders:
-
+            print("No header matches. Starting TEXT fallback.")
+            for folder in folders:
                 started = time.time()
-
                 try:
-                    client.select_folder(
-                        folder_name,
-                        readonly=True
-                    )
-
-                    uids = (
-                        search_text_fallback(
-                            client,
-                            terms
-                        )
-                    )
-
-                    elapsed = (
-                        time.time()
-                        - started
-                    )
-
-                    print(
-                        "TEXT search folder:",
-                        repr(folder_name),
-                        "uids:",
-                        len(uids),
-                        "time:",
-                        round(elapsed, 2),
-                        "sec"
-                    )
-
-                    if not uids:
-                        continue
-
-                    messages = (
-                        fetch_messages(
-                            client,
-                            folder_name,
-                            uids
-                        )
-                    )
-
-                    for item in messages:
-
-                        item["score"] = (
-                            relevance_score(
-                                item,
-                                terms
-                            )
-                        )
-
+                    client.select_folder(folder, readonly=True)
+                    uids = search_text_fallback(client, terms)
+                    print("TEXT search folder:", repr(folder), "uids:", len(uids), "time:", round(time.time()-started,2), "sec")
+                    for item in fetch_messages(client, folder, uids):
+                        item["score"] = relevance_score(item, terms)
                         if item["score"] > 0:
-                            all_results.append(
-                                item
-                            )
-
+                            all_results.append(item)
                 except Exception as e:
-                    print(
-                        "TEXT folder error:",
-                        repr(folder_name),
-                        repr(e)
-                    )
-
-        # -----------------------------------------
-        # ДУБЛИ
-        # -----------------------------------------
+                    print("TEXT folder error:", repr(folder), repr(e))
 
         unique = {}
-
         for item in all_results:
-
-            key = (
-                item["message_id"]
-                or (
-                    item["folder"],
-                    item["uid"]
-                )
-            )
-
-            current = unique.get(key)
-
-            if (
-                current is None
-                or item["score"]
-                > current["score"]
-            ):
+            key = item["message_id"] or (item["folder"], item["uid"])
+            if key not in unique or item["score"] > unique[key]["score"]:
                 unique[key] = item
-
-        results = list(
-            unique.values()
-        )
-
-        results.sort(
-            key=lambda item: (
-                item["score"],
-                item["date"].timestamp()
-                if item["date"]
-                else 0
-            ),
-            reverse=True
-        )
-
-        results = results[
-            :result_limit
-        ]
-
-        # Теперь один запрос =
-        # максимум один новый контакт.
+        results = list(unique.values())
+        results.sort(key=lambda x: (x["score"], x["date"].timestamp() if x["date"] else 0), reverse=True)
+        results = results[:result_limit]
         if results:
-            remember_best_contact_from_messages(
-                chat_id,
-                query,
-                results
-            )
-
+            remember_best_contact_from_messages(chat_id, query, results)
         return results
-
     finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
+        try: client.logout()
+        except Exception: pass
 
-
-# =========================================================
-# ПОСЛЕДНИЕ ПИСЬМА
-# =========================================================
 
 def get_recent_mail(limit=10):
     client = get_mail_connection()
-
     try:
-        client.select_folder(
-            "INBOX",
-            readonly=True
-        )
-
-        uids = client.search(
-            ["ALL"]
-        )
-
+        client.select_folder("INBOX", readonly=True)
+        uids = client.search(["ALL"])
         if not uids:
             return []
-
-        selected = (
-            uids[-limit:]
-        )[::-1]
-
-        fetched = client.fetch(
-            selected,
-            ["RFC822"]
-        )
-
+        selected = uids[-limit:][::-1]
+        fetched = client.fetch(selected, ["RFC822"])
         result = []
-
         for uid in selected:
-
             values = fetched.get(uid)
-
-            if not values:
-                continue
-
-            raw_email = (
-                values.get(b"RFC822")
-                or values.get("RFC822")
-            )
-
-            if raw_email:
-                result.append(
-                    parse_full_email(
-                        raw_email,
-                        "INBOX",
-                        uid
-                    )
-                )
-
+            raw = values.get(b"RFC822") or values.get("RFC822") if values else None
+            if raw:
+                result.append(parse_full_email(raw, "INBOX", uid))
         return result
-
     finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
+        try: client.logout()
+        except Exception: pass
 
-
-# =========================================================
-# ФОРМАТ ПОЧТЫ
-# =========================================================
 
 def format_mail_date(dt):
-    if not dt:
-        return "дата неизвестна"
-
-    return dt.strftime(
-        "%d.%m.%Y %H:%M"
-    )
+    return dt.strftime("%d.%m.%Y %H:%M") if dt else "дата неизвестна"
 
 
-def format_mail_list(
-    messages,
-    title
-):
+def format_mail_list(messages, title):
     if not messages:
-        return (
-            f"{title}\n\n"
-            "Ничего не нашла."
-        )
-
+        return title + "\n\nНичего не нашла."
     lines = [title]
-
-    for index, item in enumerate(
-        messages,
-        start=1
-    ):
-
-        lines.extend([
-            "",
-            (
-                f"{index}. "
-                f"{format_mail_date(item['date'])}"
-            ),
-            (
-                f"От: "
-                f"{item['from']}"
-            ),
-            (
-                f"Тема: "
-                f"{item['subject']}"
-            )
-        ])
-
+    for i, item in enumerate(messages, 1):
+        lines.extend(["", f"{i}. {format_mail_date(item['date'])}", f"От: {item['from']}", f"Тема: {item['subject']}"])
     return "\n".join(lines)
 
 
-def mail_context(messages):
-    lines = ["ПОЧТА:"]
-
+def mail_context(messages, body_limit=7000):
     if not messages:
-        return (
-            "ПОЧТА:\n"
-            "Подходящих писем не найдено."
-        )
-
-    ordered = sorted(
-        messages,
-        key=lambda item: (
-            item["date"]
-            or datetime.min.replace(
-                tzinfo=CALENDAR_TZ
-            )
-        )
-    )
-
-    for index, item in enumerate(
-        ordered,
-        start=1
-    ):
-
+        return "ПОЧТА:\nПодходящих писем не найдено."
+    lines = ["ПОЧТА:"]
+    ordered = sorted(messages, key=lambda x: x["date"] or datetime.min.replace(tzinfo=TZ))
+    for i, item in enumerate(ordered, 1):
+        body = item["body"][:body_limit]
         lines.extend([
-            "",
-            f"Письмо {index}",
-            (
-                "Дата: "
-                + format_mail_date(
-                    item["date"]
-                )
-            ),
-            "Папка: " + item["folder"],
-            "От: " + item["from"],
-            "Кому: " + item["to"],
-            "Тема: " + item["subject"]
+            "", f"Письмо {i}", f"Дата: {format_mail_date(item['date'])}", f"Папка: {item['folder']}",
+            f"От: {item['from']}", f"Кому: {item['to']}", f"Тема: {item['subject']}",
+            "Вложения: " + (", ".join(item["attachments"]) if item["attachments"] else "нет"),
+            "Текст письма:\n" + (body or "[текст пуст]"),
         ])
-
-        if item["attachments"]:
-            lines.append(
-                "Вложения: "
-                + ", ".join(
-                    item["attachments"]
-                )
-            )
-        else:
-            lines.append(
-                "Вложения: нет"
-            )
-
-        lines.append(
-            "Текст письма:\n"
-            + (
-                item["body"]
-                or "[текст пуст]"
-            )
-        )
-
     return "\n".join(lines)
-
 
 # =========================================================
 # OPENAI
 # =========================================================
 
 def build_saved_context(chat_id):
+    sections = []
     memories = get_memories(chat_id)
     tasks = get_open_tasks(chat_id)
-
-    sections = []
-
     if memories:
-        sections.append(
-            "ПОСТОЯННАЯ ПАМЯТЬ:\n"
-            + "\n".join(
-                f"- {row['text']}"
-                for row in memories
-            )
-        )
-
+        sections.append("ПОСТОЯННАЯ ПАМЯТЬ:\n" + "\n".join(f"- {r['text']}" for r in memories))
     if tasks:
-        sections.append(
-            "ОТКРЫТЫЕ ЗАДАЧИ:\n"
-            + "\n".join(
-                (
-                    f"- Задача #{row['id']}: "
-                    f"{row['text']}"
-                )
-                for row in tasks
-            )
-        )
-
+        sections.append("ОТКРЫТЫЕ ЗАДАЧИ:\n" + "\n".join(f"- Задача #{r['id']}: {r['text']}" for r in tasks))
+    sections.append(processes_context(chat_id))
     return "\n\n".join(sections)
 
 
 def extract_openai_text(data):
-    result = []
-
-    for item in data.get(
-        "output",
-        []
-    ):
-
+    texts = []
+    for item in data.get("output", []):
         if item.get("type") != "message":
             continue
-
-        for content in item.get(
-            "content",
-            []
-        ):
-
-            if (
-                content.get("type")
-                == "output_text"
-            ):
-
-                text = content.get(
-                    "text",
-                    ""
-                )
-
-                if text:
-                    result.append(text)
-
-    if result:
-        return "\n".join(result)
-
-    return (
-        "Я получила ответ, "
-        "но не смогла разобрать его текст."
-    )
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and content.get("text"):
+                texts.append(content["text"])
+    return "\n".join(texts) if texts else "Я получила ответ, но не смогла разобрать его текст."
 
 
-def ask_openai(
-    chat_id,
-    user_text,
-    extra_context=""
-):
-    sections = []
-
-    saved = build_saved_context(
-        chat_id
-    )
-
-    if saved:
-        sections.append(saved)
-
+def ask_openai(chat_id, user_text, extra_context="", use_history=True):
+    sections = [build_saved_context(chat_id)]
     if extra_context:
         sections.append(extra_context)
-
-    sections.append(
-        "ТЕКУЩЕЕ СООБЩЕНИЕ МАШИ:\n"
-        + user_text
-    )
-
+    sections.append("ТЕКУЩЕЕ СООБЩЕНИЕ МАШИ:\n" + user_text)
     payload = {
-        "model": "gpt-5.6",
-        "instructions": (
-            ASSISTANT_INSTRUCTIONS
-        ),
-        "input": "\n\n".join(
-            sections
-        ),
-        "store": True
+        "model": MODEL,
+        "instructions": ASSISTANT_INSTRUCTIONS,
+        "input": "\n\n".join(sections),
+        "store": True,
     }
-
-    previous_id = (
-        get_previous_response_id(
-            chat_id
-        )
-    )
-
+    previous_id = get_previous_response_id(chat_id) if use_history else None
     if previous_id:
-        payload[
-            "previous_response_id"
-        ] = previous_id
-
-    response = requests.post(
+        payload["previous_response_id"] = previous_id
+    r = requests.post(
         OPENAI_URL,
-        headers={
-            "Authorization": (
-                f"Bearer "
-                f"{OPENAI_API_KEY}"
-            ),
-            "Content-Type": (
-                "application/json"
-            )
-        },
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
         json=payload,
-        timeout=120
+        timeout=120,
     )
-
-    if (
-        response.status_code == 400
-        and previous_id
-    ):
-
-        clear_previous_response_id(
-            chat_id
-        )
-
-        payload.pop(
-            "previous_response_id",
-            None
-        )
-
-        response = requests.post(
+    if r.status_code == 400 and previous_id:
+        clear_previous_response_id(chat_id)
+        payload.pop("previous_response_id", None)
+        r = requests.post(
             OPENAI_URL,
-            headers={
-                "Authorization": (
-                    f"Bearer "
-                    f"{OPENAI_API_KEY}"
-                ),
-                "Content-Type": (
-                    "application/json"
-                )
-            },
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
             json=payload,
-            timeout=120
+            timeout=120,
         )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if data.get("id"):
-        save_previous_response_id(
-            chat_id,
-            data["id"]
-        )
-
-    return extract_openai_text(
-        data
-    )
-
+    r.raise_for_status()
+    data = r.json()
+    if data.get("id") and use_history:
+        save_previous_response_id(chat_id, data["id"])
+    return extract_openai_text(data)
 
 # =========================================================
-# КАЛЕНДАРЬ + ИИ
+# BRIEF
 # =========================================================
 
-def review_calendar(
-    chat_id,
-    target_date,
-    days,
-    user_request
-):
-    context = calendar_context(
-        target_date,
-        days
-    )
+def build_brief(chat_id):
+    today = datetime.now(TZ).date()
+    cal = calendar_context(today, 1)
+    proc = processes_context(chat_id)
+    tasks = get_open_tasks(chat_id)
+    task_context = "ОБЫЧНЫЕ ЗАДАЧИ:\n" + ("\n".join(f"- #{r['id']}: {r['text']}" for r in tasks) if tasks else "Открытых задач нет.")
+
+    try:
+        recent = get_recent_mail(8)
+        # For brief we do NOT send full email bodies to save time/tokens.
+        mail_lines = ["СВЕЖАЯ ПОЧТА:"]
+        if recent:
+            for i, m in enumerate(recent, 1):
+                mail_lines.append(f"- {format_mail_date(m['date'])}: {m['from']} — {m['subject']}")
+        else:
+            mail_lines.append("Свежих писем не найдено.")
+        mail_brief = "\n".join(mail_lines)
+    except Exception as e:
+        print("Brief mail error:", repr(e))
+        mail_brief = "СВЕЖАЯ ПОЧТА:\nНе удалось получить почту."
 
     prompt = """
-Проверь календарь как внимательный бизнес-ассистент.
-
-Проверь:
-- пересечения;
-- встречи без 15–30 минут воздуха;
-- наличие обеда;
-- повестки;
-- адреса;
-- Zoom-ссылки;
-- подтверждения участников;
-- связь с открытыми задачами.
-
-Не выдумывай отсутствующие сведения.
-Сначала важные риски.
-Потом коротко скажи, что выглядит хорошо.
+Составь утренний/текущий рабочий бриф Маши на сегодня.
+Не пересказывай всё подряд. Приоритизируй.
+Формат:
+1. Сегодня — ключевые встречи.
+2. Риски календаря — пересечения, отсутствие воздуха, повестки, адреса, ссылки, обед.
+3. Что требует действия — обычные задачи + только доступные этапы процессов.
+4. Что ждём от других — подписи, счета, документы, согласования.
+5. Что нужно проконтролировать — например 1С, оплаты и зависшие хвосты.
+6. Почта — только то, что по теме/отправителю выглядит потенциально важным; если по одним заголовкам нельзя понять важность, так и скажи.
+7. Топ-3 на сегодня.
+Будь компактной и практичной. Не выдумывай.
 """
 
-    return ask_openai(
-        chat_id,
-        user_request,
-        extra_context=(
-            context
-            + "\n\n"
-            + prompt
-        )
-    )
-
+    extra = "\n\n".join([cal, task_context, proc, mail_brief, prompt])
+    return ask_openai(chat_id, "Сделай мой рабочий бриф на сегодня.", extra_context=extra, use_history=False)
 
 # =========================================================
-# ПОКАЗ ПАМЯТИ / ЗАДАЧ / КОНТАКТОВ
+# DISPLAY HELPERS
 # =========================================================
 
 def show_tasks(chat_id):
-    tasks = get_open_tasks(chat_id)
-
-    if not tasks:
-        send_message(
-            chat_id,
-            "Сейчас открытых задач нет."
-        )
-        return
-
-    send_message(
-        chat_id,
-        "Твои открытые задачи:\n\n"
-        + "\n\n".join(
-            (
-                f"#{row['id']} — "
-                f"{row['text']}"
-            )
-            for row in tasks
-        )
-    )
+    rows = get_open_tasks(chat_id)
+    send_message(chat_id, "Сейчас открытых задач нет." if not rows else "Твои открытые задачи:\n\n" + "\n".join(f"#{r['id']} — {r['text']}" for r in rows))
 
 
 def show_memory(chat_id):
-    memories = get_memories(chat_id)
+    rows = get_memories(chat_id)
+    send_message(chat_id, "В постоянной памяти пока ничего нет." if not rows else "Вот что я помню:\n\n" + "\n".join(f"#{r['id']} — {r['text']}" for r in rows))
 
-    if not memories:
-        send_message(
-            chat_id,
-            "В постоянной памяти "
-            "пока ничего нет."
-        )
+
+def show_processes(chat_id):
+    rows = get_open_processes(chat_id)
+    if not rows:
+        send_message(chat_id, "Открытых процессов пока нет.")
         return
-
-    send_message(
-        chat_id,
-        "Вот что я помню:\n\n"
-        + "\n\n".join(
-            (
-                f"#{row['id']} — "
-                f"{row['text']}"
-            )
-            for row in memories
-        )
-    )
+    lines = ["Открытые процессы:"]
+    for p in rows:
+        steps = get_process_steps(p["id"])
+        by_no = {s["step_no"]: s for s in steps}
+        available = [s for s in steps if is_step_available(s, by_no)]
+        next_text = available[0]["text"] if available else "нет доступного шага"
+        lines.append(f"\n#{p['id']} — {p['title']}\nСледующий шаг: {next_text}")
+    send_message(chat_id, "\n".join(lines))
 
 
 def show_mail_contacts(chat_id):
-    rows = list_verified_mail_contacts(
-        chat_id
-    )
-
+    rows = list_verified_mail_contacts(chat_id)
     if not rows:
-        send_message(
-            chat_id,
-            "Проверенных почтовых "
-            "контактов пока нет."
-        )
+        send_message(chat_id, "Проверенных почтовых контактов пока нет.")
         return
+    lines = ["Проверенные почтовые контакты:"]
+    for r in rows:
+        lines.append(f"\n{r['alias']} → {r['email']}")
+    send_message(chat_id, "\n".join(lines))
 
-    lines = [
-        "Проверенные почтовые контакты:"
-    ]
-
-    for row in rows:
-
-        lines.append(
-            "\n"
-            f"{row['alias']} → "
-            f"{row['email']}"
-        )
-
-        if row["display_name"]:
-            lines.append(
-                str(row["display_name"])
-            )
-
-    send_message(
-        chat_id,
-        "\n".join(lines)
-    )
-
-
-# =========================================================
-# КОМАНДЫ
-# =========================================================
 
 def strip_punctuation(text):
-    return re.sub(
-        r"[?!.,]+$",
-        "",
-        text.strip().lower()
-    ).strip()
+    return re.sub(r"[?!.,]+$", "", text.strip().lower()).strip()
+
+# =========================================================
+# COMMAND HANDLERS
+# =========================================================
+
+def try_handle_process(chat_id, text):
+    normalized = re.sub(r"\s+", " ", text.strip()).strip()
+    clean = strip_punctuation(normalized)
+
+    if clean in {"/processes", "процессы", "покажи процессы", "мои процессы"}:
+        show_processes(chat_id); return True
+
+    if clean in {"/giftcase", "создай процесс по подаркам", "создай процесс подарки директорам"}:
+        pid, created = seed_gift_process(chat_id)
+        if created:
+            send_message(chat_id, "Создала первый процесс ✅\n\n" + format_process(pid, chat_id))
+        else:
+            send_message(chat_id, "Он уже есть. Вот текущее состояние:\n\n" + format_process(pid, chat_id))
+        return True
+
+    m = re.match(r"^/(?:process|case)\s+(\d+)\s*$", normalized, flags=re.I)
+    if m:
+        send_message(chat_id, format_process(int(m.group(1)), chat_id)); return True
+
+    m = re.match(r"^(?:покажи процесс|процесс)\s*#?(\d+)\s*$", normalized, flags=re.I)
+    if m:
+        send_message(chat_id, format_process(int(m.group(1)), chat_id)); return True
+
+    m = re.match(r"^(?:/donep|закрой этап|этап готов)\s*#?(\d+)[\.:](\d+)\s*$", normalized, flags=re.I)
+    if m:
+        pid, step_no = int(m.group(1)), int(m.group(2))
+        ok, msg = complete_process_step(chat_id, pid, step_no)
+        send_message(chat_id, msg)
+        if ok:
+            send_message(chat_id, format_process(pid, chat_id))
+        return True
+
+    m = re.match(r"^(?:создай процесс|новый процесс|процесс:)\s+(.+)$", normalized, flags=re.I)
+    if m:
+        title = m.group(1).strip()
+        pid = create_process(chat_id, title)
+        send_message(chat_id, f"Создала процесс #{pid}: {title}\n\nДобавить этап: /step {pid} текст этапа")
+        return True
+
+    m = re.match(r"^/step\s+(\d+)\s+(.+)$", normalized, flags=re.I | re.S)
+    if m:
+        pid, step_text = int(m.group(1)), m.group(2).strip()
+        if not get_process(pid, chat_id):
+            send_message(chat_id, "Не нашла такой процесс."); return True
+        steps = get_process_steps(pid)
+        step_no = (max([s["step_no"] for s in steps]) + 1) if steps else 1
+        add_process_step(pid, step_no, step_text)
+        send_message(chat_id, f"Добавила этап {pid}.{step_no} ✅")
+        return True
+
+    return False
 
 
-def try_handle_mail(
-    chat_id,
-    text
-):
-    normalized = re.sub(
-        r"\s+",
-        " ",
-        text.strip()
-    ).strip()
-
-    clean = strip_punctuation(
-        normalized
-    )
+def try_handle_mail(chat_id, text):
+    normalized = re.sub(r"\s+", " ", text.strip()).strip()
+    clean = strip_punctuation(normalized)
 
     if clean == "/mail":
-
         try:
-            client = get_mail_connection()
-
-            folders = (
-                get_useful_mail_folders(
-                    client
-                )
-            )
-
-            client.logout()
-
-            send_message(
-                chat_id,
-                "Связь с Яндекс.Почтой есть ✅\n\n"
-                f"Рабочих папок вижу: "
-                f"{len(folders)}."
-            )
-
+            c = get_mail_connection(); folders = get_useful_mail_folders(c); c.logout()
+            send_message(chat_id, f"Связь с Яндекс.Почтой есть ✅\nРабочих папок вижу: {len(folders)}.")
         except Exception as e:
-            print(
-                "Mail connection error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не получилось подключиться "
-                "к Яндекс.Почте."
-            )
-
+            print("Mail connection error:", repr(e)); send_message(chat_id, "Не получилось подключиться к Яндекс.Почте.")
         return True
 
-    if clean in {
-        "/mailcontacts",
-        "почтовые контакты",
-        "покажи почтовые контакты"
-    }:
+    if clean in {"/mailcontacts", "почтовые контакты", "покажи почтовые контакты"}:
+        show_mail_contacts(chat_id); return True
 
-        show_mail_contacts(
-            chat_id
-        )
-
+    m = re.match(r"^(?:/mailforget|забудь почтовый контакт)\s+(.+)$", normalized, flags=re.I)
+    if m:
+        q = m.group(1).strip(); n = forget_mail_contact(chat_id, q)
+        send_message(chat_id, f"Удалила почтовый контакт «{q}» ✅" if n else f"Контакт «{q}» не нашла.")
         return True
 
-    forget_match = re.match(
-        r"^(?:"
-        r"/mailforget|"
-        r"забудь почтовый контакт"
-        r")\s+(.+)$",
-        normalized,
-        flags=re.IGNORECASE
-    )
-
-    if forget_match:
-
-        query = (
-            forget_match
-            .group(1)
-            .strip()
-        )
-
-        deleted = forget_mail_contact(
-            chat_id,
-            query
-        )
-
-        if deleted:
-            send_message(
-                chat_id,
-                f"Удалила почтовый контакт "
-                f"«{query}» ✅"
-            )
-        else:
-            send_message(
-                chat_id,
-                f"Контакт «{query}» "
-                "не нашла."
-            )
-
-        return True
-
-    if clean in {
-        "/mailrecent",
-        "последние письма",
-        "покажи последние письма",
-        "что нового в почте"
-    }:
-
+    if clean in {"/mailrecent", "последние письма", "покажи последние письма", "что нового в почте"}:
         try:
-            send_message(
-                chat_id,
-                "Смотрю почту..."
-            )
-
-            messages = get_recent_mail(
-                10
-            )
-
-            send_message(
-                chat_id,
-                format_mail_list(
-                    messages,
-                    "Последние письма:"
-                )
-            )
-
+            send_message(chat_id, "Смотрю почту...")
+            send_message(chat_id, format_mail_list(get_recent_mail(10), "Последние письма:"))
         except Exception as e:
-            print(
-                "Recent mail error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не смогла прочитать почту."
-            )
-
+            print("Recent mail error:", repr(e)); send_message(chat_id, "Не смогла прочитать почту.")
         return True
 
-    search_patterns = [
+    patterns = [
         r"^найди\s+письмо\s+(?:про|от|по)?\s*(.+)$",
         r"^найди\s+письма\s+(?:про|от|по)?\s*(.+)$",
         r"^найди\s+переписку\s+(?:про|с|по)?\s*(.+)$",
@@ -3102,439 +1444,99 @@ def try_handle_mail(
         r"^поищи\s+письмо\s+(?:про|от|по)?\s*(.+)$",
         r"^поищи\s+в\s+почте\s+(.+)$",
         r"^поиск\s+почты\s*[,:-]?\s*(.+)$",
-        r"^почта\s*[,:-]\s*(.+)$"
+        r"^почта\s*[,:-]\s*(.+)$",
     ]
-
-    for pattern in search_patterns:
-
-        match = re.match(
-            pattern,
-            normalized,
-            flags=re.IGNORECASE
-        )
-
-        if not match:
+    for pattern in patterns:
+        m = re.match(pattern, normalized, flags=re.I)
+        if not m:
             continue
-
-        query = (
-            match.group(1)
-            .strip()
-        )
-
+        query = m.group(1).strip()
         try:
-            started = time.time()
-
-            send_message(
-                chat_id,
-                f"Ищу в почте: {query}..."
-            )
-
-            messages = search_mail_fast(
-                chat_id,
-                query
-            )
-
-            print(
-                "Mail search finished in",
-                round(
-                    time.time()
-                    - started,
-                    2
-                ),
-                "seconds"
-            )
-
+            started = time.time(); send_message(chat_id, f"Ищу в почте: {query}...")
+            messages = search_mail_fast(chat_id, query)
+            print("Mail search finished in", round(time.time()-started,2), "seconds")
             if not messages:
-                send_message(
-                    chat_id,
-                    (
-                        f"По запросу «{query}» "
-                        "ничего не нашла."
-                    )
-                )
-                return True
-
-            context = mail_context(
-                messages
+                send_message(chat_id, f"По запросу «{query}» ничего не нашла."); return True
+            prompt = (
+                f"Я попросила найти в почте: {query}.\n"
+                "Проанализируй только реальные найденные письма. Если это цепочка — собери хронологию. "
+                "Коротко: что нашлось; какое письмо нужное; суть; последняя договоренность; следующий шаг; связь с задачами/процессами."
             )
-
-            analysis_prompt = (
-                f"Я попросила найти в почте: {query}.\n\n"
-                "Проанализируй только реальные найденные письма.\n"
-                "Если это одна переписка, собери её по хронологии.\n"
-                "Коротко скажи:\n"
-                "1. что нашлось;\n"
-                "2. какое письмо наиболее похоже на нужное;\n"
-                "3. в чем суть;\n"
-                "4. последнюю договоренность;\n"
-                "5. что мне нужно сделать дальше;\n"
-                "6. связано ли это с моими сохраненными задачами.\n"
-                "Не придумывай отсутствующие сведения."
-            )
-
-            answer = ask_openai(
-                chat_id,
-                analysis_prompt,
-                extra_context=context
-            )
-
-            send_message(
-                chat_id,
-                answer
-            )
-
+            answer = ask_openai(chat_id, prompt, extra_context=mail_context(messages))
+            send_message(chat_id, answer)
         except Exception as e:
-            print(
-                "Mail search error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не смогла выполнить поиск "
-                "по почте. Посмотри лог Railway."
-            )
-
+            print("Mail search error:", repr(e)); send_message(chat_id, "Не смогла выполнить поиск по почте. Посмотри лог Railway.")
         return True
-
     return False
 
 
-def try_handle_calendar(
-    chat_id,
-    text
-):
-    clean = strip_punctuation(
-        text
-    )
+def try_handle_calendar(chat_id, text):
+    clean = strip_punctuation(text)
+    today = datetime.now(TZ).date()
 
-    today = datetime.now(
-        CALENDAR_TZ
-    ).date()
-
-    if clean in {
-        "/today",
-        "что у меня сегодня",
-        "что сегодня",
-        "встречи сегодня",
-        "календарь сегодня",
-        "какие у меня сегодня встречи"
-    }:
-
-        try:
-            send_message(
-                chat_id,
-                format_calendar_day(
-                    today,
-                    "Сегодня:"
-                )
-            )
-        except Exception as e:
-            print(
-                "Calendar error:",
-                repr(e)
-            )
-
-        return True
-
-    if clean in {
-        "/tomorrow",
-        "что у меня завтра",
-        "что завтра",
-        "встречи завтра",
-        "календарь завтра"
-    }:
-
-        tomorrow = (
-            today
-            + timedelta(days=1)
-        )
-
-        send_message(
-            chat_id,
-            format_calendar_day(
-                tomorrow,
-                "Завтра:"
-            )
-        )
-
-        return True
-
-    if clean in {
-        "/week",
-        "календарь на неделю",
-        "встречи на неделю",
-        "что у меня на этой неделе"
-    }:
-
-        send_message(
-            chat_id,
-            format_calendar_period(
-                today,
-                7
-            )
-        )
-
-        return True
-
-    if clean in {
-        "/checktoday",
-        "проверь сегодня",
-        "проверь календарь на сегодня",
-        "проверь мой календарь на сегодня"
-    }:
-
-        send_message(
-            chat_id,
-            "Проверяю календарь..."
-        )
-
-        send_message(
-            chat_id,
-            review_calendar(
-                chat_id,
-                today,
-                1,
-                text
-            )
-        )
-
-        return True
-
-    if clean in {
-        "/checktomorrow",
-        "проверь завтра",
-        "проверь календарь на завтра"
-    }:
-
-        tomorrow = (
-            today
-            + timedelta(days=1)
-        )
-
-        send_message(
-            chat_id,
-            "Проверяю календарь..."
-        )
-
-        send_message(
-            chat_id,
-            review_calendar(
-                chat_id,
-                tomorrow,
-                1,
-                text
-            )
-        )
-
-        return True
-
-    if clean in {
-        "/checkweek",
-        "проверь неделю",
-        "проверь мою неделю"
-    }:
-
-        send_message(
-            chat_id,
-            "Проверяю неделю..."
-        )
-
-        send_message(
-            chat_id,
-            review_calendar(
-                chat_id,
-                today,
-                7,
-                text
-            )
-        )
-
-        return True
-
+    if clean in {"/today","что у меня сегодня","что сегодня","встречи сегодня","календарь сегодня","какие у меня сегодня встречи"}:
+        send_message(chat_id, format_calendar_day(today, "Сегодня:")); return True
+    if clean in {"/tomorrow","что у меня завтра","что завтра","встречи завтра","календарь завтра"}:
+        send_message(chat_id, format_calendar_day(today + timedelta(days=1), "Завтра:")); return True
+    if clean in {"/week","календарь на неделю","встречи на неделю","что у меня на этой неделе"}:
+        send_message(chat_id, format_calendar_period(today, 7)); return True
+    if clean in {"/checktoday","проверь сегодня","проверь календарь на сегодня","проверь мой календарь на сегодня"}:
+        prompt = "Проверь календарь: пересечения, воздух, обед, повестки, адреса, ссылки, подтверждения и связь с задачами/процессами. Не выдумывай."
+        send_message(chat_id, "Проверяю календарь...")
+        send_message(chat_id, ask_openai(chat_id, text, calendar_context(today, 1) + "\n\n" + prompt)); return True
+    if clean in {"/checkweek","проверь неделю","проверь мою неделю"}:
+        prompt = "Проверь неделю: перегруз, конфликты, отсутствие воздуха/обеда, подготовку к встречам и доступные рабочие процессы."
+        send_message(chat_id, "Проверяю неделю...")
+        send_message(chat_id, ask_openai(chat_id, text, calendar_context(today, 7) + "\n\n" + prompt)); return True
     return False
 
 
-def try_handle_command(
-    chat_id,
-    text
-):
-    normalized = re.sub(
-        r"\s+",
-        " ",
-        text.strip()
-    ).strip()
-
-    clean = strip_punctuation(
-        normalized
-    )
+def try_handle_command(chat_id, text):
+    normalized = re.sub(r"\s+", " ", text.strip()).strip()
+    clean = strip_punctuation(normalized)
 
     if clean == "/start":
-
-        send_message(
-            chat_id,
-            "Привет 👋 Я Маша 2.0.\n\n"
-            "У меня есть ИИ, память, задачи, "
-            "Яндекс.Календарь и Яндекс.Почта."
-        )
-
-        return True
-
+        send_message(chat_id, "Привет 👋 Я Маша 2.0. У меня есть ИИ, память, задачи, процессы, Яндекс.Календарь и read-only Яндекс.Почта."); return True
     if clean == "/health":
-
-        send_message(
-            chat_id,
-            "Я работаю ✅"
-        )
-
-        return True
-
+        send_message(chat_id, "Я работаю ✅"); return True
     if clean == "/new":
-
-        clear_previous_response_id(
-            chat_id
-        )
-
-        send_message(
-            chat_id,
-            "Начинаем новый разговор. "
-            "Память и задачи я не забыла."
-        )
-
+        clear_previous_response_id(chat_id); send_message(chat_id, "Начинаем новый разговор. Постоянную память, задачи и процессы я не забыла."); return True
+    if clean in {"/brief","бриф","мой бриф","утренний бриф","что важно сегодня"}:
+        send_message(chat_id, "Собираю бриф: календарь, задачи, процессы и свежую почту...")
+        try:
+            send_message(chat_id, build_brief(chat_id))
+        except Exception as e:
+            print("Brief error:", repr(e)); send_message(chat_id, "Не смогла собрать весь бриф. Посмотри лог Railway.")
         return True
+    if clean in {"/tasks","задачи","мои задачи","покажи задачи","покажи мои задачи"}:
+        show_tasks(chat_id); return True
+    if clean in {"/memory","что ты помнишь","покажи память","что у тебя в памяти","что ты запомнила"}:
+        show_memory(chat_id); return True
 
-    if clean in {
-        "/tasks",
-        "задачи",
-        "мои задачи",
-        "покажи задачи",
-        "покажи мои задачи"
-    }:
+    m = re.match(r"^(?:закрой задачу|закрыть задачу|/done)\s*#?\s*(\d+)", normalized, flags=re.I)
+    if m:
+        tid = int(m.group(1)); send_message(chat_id, f"Задачу #{tid} закрыла ✅" if complete_task(chat_id, tid) else f"Не нашла открытую задачу #{tid}."); return True
 
-        show_tasks(chat_id)
-        return True
+    for pattern in [
+        r"^задача\s*[,:-]?\s+(.+)$", r"^запиши\s+задачу\s*[,:-]?\s+(.+)$",
+        r"^добавь\s+задачу\s*[,:-]?\s+(.+)$", r"^добавь\s+в\s+задачи\s*[,:-]?\s+(.+)$",
+        r"^создай\s+задачу\s*[,:-]?\s+(.+)$", r"^поставь\s+задачу\s*[,:-]?\s+(.+)$",
+        r"^запомни\s+задачу\s*[,:-]?\s+(.+)$",
+    ]:
+        m = re.match(pattern, normalized, flags=re.I | re.S)
+        if m:
+            t = m.group(1).strip(); tid = add_task(chat_id, t); send_message(chat_id, f"Записала задачу ✅\n#{tid}: {t}"); return True
 
-    done_match = re.match(
-        r"^(?:"
-        r"закрой задачу|"
-        r"закрыть задачу|"
-        r"/done"
-        r")"
-        r"\s*#?\s*(\d+)",
-        normalized,
-        flags=re.IGNORECASE
-    )
+    m = re.match(r"^(?:забудь|удали из памяти|удали запись)\s*#?\s*(\d+)", normalized, flags=re.I)
+    if m:
+        mid = int(m.group(1)); send_message(chat_id, f"Удалила запись #{mid}." if delete_memory(chat_id, mid) else f"Не нашла запись #{mid}."); return True
 
-    if done_match:
-
-        task_id = int(
-            done_match.group(1)
-        )
-
-        if complete_task(
-            chat_id,
-            task_id
-        ):
-
-            send_message(
-                chat_id,
-                f"Задачу #{task_id} закрыла ✅"
-            )
-
-        return True
-
-    task_patterns = [
-        r"^задача\s*[,:-]?\s+(.+)$",
-        r"^запиши\s+задачу\s*[,:-]?\s+(.+)$",
-        r"^добавь\s+задачу\s*[,:-]?\s+(.+)$",
-        r"^добавь\s+в\s+задачи\s*[,:-]?\s+(.+)$",
-        r"^создай\s+задачу\s*[,:-]?\s+(.+)$",
-        r"^поставь\s+задачу\s*[,:-]?\s+(.+)$",
-        r"^запомни\s+задачу\s*[,:-]?\s+(.+)$"
-    ]
-
-    for pattern in task_patterns:
-
-        match = re.match(
-            pattern,
-            normalized,
-            flags=(
-                re.IGNORECASE
-                | re.DOTALL
-            )
-        )
-
-        if match:
-
-            task_text = (
-                match.group(1)
-                .strip()
-            )
-
-            task_id = add_task(
-                chat_id,
-                task_text
-            )
-
-            send_message(
-                chat_id,
-                "Записала задачу ✅\n\n"
-                f"#{task_id}: {task_text}"
-            )
-
-            return True
-
-    if clean in {
-        "/memory",
-        "что ты помнишь",
-        "покажи память",
-        "что у тебя в памяти",
-        "что ты запомнила"
-    }:
-
-        show_memory(chat_id)
-        return True
-
-    memory_patterns = [
-        r"^запомни\s*,?\s*что\s+(.+)$",
-        r"^запомни\s*[,:-]?\s+(.+)$",
-        r"^сохрани\s+в\s+память\s*[,:-]?\s+(.+)$"
-    ]
-
-    for pattern in memory_patterns:
-
-        match = re.match(
-            pattern,
-            normalized,
-            flags=(
-                re.IGNORECASE
-                | re.DOTALL
-            )
-        )
-
-        if match:
-
-            memory_text = (
-                match.group(1)
-                .strip()
-            )
-
-            memory_id = add_memory(
-                chat_id,
-                memory_text
-            )
-
-            send_message(
-                chat_id,
-                "Запомнила 🧠\n\n"
-                f"#{memory_id}: "
-                f"{memory_text}"
-            )
-
-            return True
+    for pattern in [r"^запомни\s*,?\s*что\s+(.+)$", r"^запомни\s*[,:-]?\s+(.+)$", r"^сохрани\s+в\s+память\s*[,:-]?\s+(.+)$"]:
+        m = re.match(pattern, normalized, flags=re.I | re.S)
+        if m:
+            t = m.group(1).strip(); mid = add_memory(chat_id, t); send_message(chat_id, f"Запомнила 🧠\n#{mid}: {t}"); return True
 
     return False
-
 
 # =========================================================
 # MAIN
@@ -3542,152 +1544,66 @@ def try_handle_command(
 
 def main():
     init_db()
-
-    print(
-        "Masha 2.0 запущена: "
-        "safe mail contacts v5."
-    )
-
+    print("Masha 2.0 запущена: brief + processes + safe mail contacts v6.")
     offset = None
+    known_chat_ids = set()
+    last_reminder_scan = 0
 
     while True:
+        # Periodic reminder scan once per minute for chats seen since this process started.
+        if time.time() - last_reminder_scan >= 60:
+            last_reminder_scan = time.time()
+            for chat_id in list(known_chat_ids):
+                try:
+                    for p, s in due_process_reminders(chat_id):
+                        send_message(chat_id, f"Напоминание по процессу #{p['id']} «{p['title']}»:\n{s['step_no']}. {s['text']}")
+                        mark_step_reminded(s["id"])
+                except Exception as e:
+                    print("Reminder scan error:", chat_id, repr(e))
 
-        params = {
-            "timeout": 30
-        }
-
+        params = {"timeout": 30}
         if offset is not None:
             params["offset"] = offset
 
         try:
-
-            response = requests.get(
-                f"{TELEGRAM_API}/getUpdates",
-                params=params,
-                timeout=40
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            for update in data.get(
-                "result",
-                []
-            ):
-
-                offset = (
-                    update["update_id"]
-                    + 1
-                )
-
-                message = update.get(
-                    "message"
-                )
-
+            r = requests.get(f"{TELEGRAM_API}/getUpdates", params=params, timeout=40)
+            r.raise_for_status()
+            data = r.json()
+            for update in data.get("result", []):
+                offset = update["update_id"] + 1
+                message = update.get("message")
                 if not message:
                     continue
-
-                chat_id = (
-                    message["chat"]["id"]
-                )
-
-                text = message.get(
-                    "text",
-                    ""
-                )
-
+                chat_id = message["chat"]["id"]
+                known_chat_ids.add(chat_id)
+                text = message.get("text", "")
                 if not text:
                     continue
+                print("Incoming:", chat_id, repr(text))
 
-                print(
-                    "Incoming:",
-                    chat_id,
-                    repr(text)
-                )
-
-                if try_handle_mail(
-                    chat_id,
-                    text
-                ):
+                if try_handle_process(chat_id, text):
+                    continue
+                if try_handle_mail(chat_id, text):
+                    continue
+                if try_handle_calendar(chat_id, text):
+                    continue
+                if try_handle_command(chat_id, text):
                     continue
 
-                if try_handle_calendar(
-                    chat_id,
-                    text
-                ):
-                    continue
-
-                if try_handle_command(
-                    chat_id,
-                    text
-                ):
-                    continue
-
-                send_message(
-                    chat_id,
-                    "Думаю..."
-                )
-
+                send_message(chat_id, "Думаю...")
                 try:
-
-                    answer = ask_openai(
-                        chat_id,
-                        text
-                    )
-
-                    send_message(
-                        chat_id,
-                        answer
-                    )
-
+                    send_message(chat_id, ask_openai(chat_id, text))
                 except requests.HTTPError as e:
-
-                    print(
-                        "OpenAI HTTP error:",
-                        (
-                            e.response.text
-                            if e.response
-                            else repr(e)
-                        )
-                    )
-
-                    send_message(
-                        chat_id,
-                        "Я дошла до OpenAI, "
-                        "но получила ошибку API."
-                    )
-
+                    print("OpenAI HTTP error:", e.response.text if e.response is not None else repr(e))
+                    send_message(chat_id, "Я дошла до OpenAI, но получила ошибку API.")
                 except Exception as e:
-
-                    print(
-                        "OpenAI error:",
-                        repr(e)
-                    )
-
-                    send_message(
-                        chat_id,
-                        "У меня возникла техническая "
-                        "ошибка при обращении к ИИ."
-                    )
+                    print("OpenAI error:", repr(e))
+                    send_message(chat_id, "У меня возникла техническая ошибка при обращении к ИИ.")
 
         except requests.RequestException as e:
-
-            print(
-                "Telegram network error:",
-                repr(e)
-            )
-
-            time.sleep(3)
-
+            print("Telegram network error:", repr(e)); time.sleep(3)
         except Exception as e:
-
-            print(
-                "Telegram error:",
-                repr(e)
-            )
-
-            time.sleep(3)
+            print("Telegram error:", repr(e)); time.sleep(3)
 
 
 if __name__ == "__main__":
