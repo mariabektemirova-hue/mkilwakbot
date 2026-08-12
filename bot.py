@@ -2,11 +2,17 @@ import os
 import re
 import time
 import sqlite3
+import imaplib
+import email
+import html
 import requests
 import caldav
 
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
+
+from email.header import decode_header, make_header
+from email.utils import parsedate_to_datetime
 from icalendar import Calendar
 
 
@@ -20,10 +26,16 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 YANDEX_CALENDAR_LOGIN = os.environ["YANDEX_CALENDAR_LOGIN"]
 YANDEX_CALENDAR_PASSWORD = os.environ["YANDEX_CALENDAR_PASSWORD"]
 
+YANDEX_MAIL_LOGIN = os.environ["YANDEX_MAIL_LOGIN"]
+YANDEX_MAIL_PASSWORD = os.environ["YANDEX_MAIL_PASSWORD"]
+
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
 YANDEX_CALDAV_URL = "https://caldav.yandex.ru/"
+
+YANDEX_IMAP_HOST = "imap.yandex.com"
+YANDEX_IMAP_PORT = 993
 
 DB_PATH = "/data/masha.db"
 
@@ -64,8 +76,8 @@ ASSISTANT_INSTRUCTIONS = """
 - Пятница предпочтительна для внешних встреч.
 - Желательный рабочий диапазон примерно 10:30–19:00.
 - Между встречами желательно оставлять 15–30 минут воздуха.
-- Обед не нужно совмещать с внутренними встречами.
-- Сохраняй свободные окна под срочные запросы и собеседования.
+- Обед желательно не совмещать с внутренними встречами.
+- Нужно сохранять окна для срочных встреч и собеседований.
 
 ЧЕК-ЛИСТ ВСТРЕЧ
 
@@ -73,82 +85,59 @@ ASSISTANT_INSTRUCTIONS = """
 - Все участники должны подтвердить присутствие.
 - В описании события должна быть повестка.
 - Для внешней встречи обязательно должен быть адрес.
-- В календаре нужно сохранять время на обед.
-- Между встречами желательно оставлять немного воздуха.
+- В календаре должно быть время на обед.
 - Для собеседования резюме должно быть вложено в событие.
 - Перед собеседованием резюме нужно распечатать.
-- Для PRM нужно заранее собрать материалы руководителей в онлайн-папку
-  и проверить доступ к ней.
+- Для PRM нужно заранее собрать материалы руководителей
+  в онлайн-папку и проверить доступ.
+
+ПОЧТА
+
+- У тебя есть read-only доступ к Яндекс.Почте через данные,
+  которые программа передает тебе.
+- Ты можешь анализировать найденные письма.
+- Не говори, что отправила письмо.
+- Не говори, что удалила, архивировала или переместила письмо.
+- Не придумывай содержимое писем.
+- Если поиск ничего не нашел, так и скажи.
+- Если из письма виден следующий шаг, помоги Маше его сформулировать.
+- Если письмо связано с уже сохраненной задачей, укажи на связь.
 
 КАК РАБОТАТЬ С МАШЕЙ
 
 - Отвечай по-русски.
 - Говори естественно, тепло и без канцелярита.
 - На простой вопрос отвечай коротко.
-- Если сообщение хаотичное — сама структурируй его.
-- Учитывай предыдущие сообщения текущего диалога.
-- Учитывай ПОСТОЯННУЮ ПАМЯТЬ, если она передана тебе.
-- Учитывай ОТКРЫТЫЕ ЗАДАЧИ, если они переданы тебе.
+- Если сообщение хаотичное, сама структурируй.
+- Учитывай предыдущий диалог.
+- Учитывай ПОСТОЯННУЮ ПАМЯТЬ.
+- Учитывай ОТКРЫТЫЕ ЗАДАЧИ.
+- Учитывай реальные данные КАЛЕНДАРЯ и ПОЧТЫ, если они переданы.
 - Не заставляй Машу повторять уже известное.
-- Если видишь риск забыть дедлайн, повестку, материалы,
-  подтверждение, ссылку или адрес — отдельно подсвети это.
-- Помогай формулировать письма, сообщения, планы и списки действий.
 - Не утверждай, что реально выполнила действие, если оно не выполнено.
-- Пока у тебя нет доступа к Яндекс.Почте.
-- Календарь ты пока умеешь только читать.
-- Не утверждай, что создала, перенесла или удалила событие.
-- Не говори, что поставила напоминание, если реальное напоминание
-  технически не создано.
+- Календарь пока только читаешь.
+- Почту пока только читаешь.
 
-ВАЖНО О КАЛЕНДАРЕ
+ВАЖНО О ДОСТОВЕРНОСТИ
 
-Если передан раздел КАЛЕНДАРЬ, это реальные события
-из Яндекс.Календаря.
-
-Не выдумывай отсутствующие сведения.
-
-Если в событии нет описания, это не всегда означает, что повестки
-действительно нет: говори "в данных календаря не вижу повестки",
+Если в данных календаря нет описания, говори:
+"в данных календаря не вижу повестки",
 а не "повестки нет".
 
-Если нет location, говори "в данных события не вижу адреса".
+Если нет location:
+"в данных события не вижу адреса".
 
-Если нет ссылки, не утверждай автоматически, что встреча точно в Zoom.
+Если в разделе ПОЧТА есть письмо,
+опирайся только на реально переданный текст.
 
-Если два события стоят подряд без паузы, обязательно отметь это.
-
-Если события пересекаются по времени — это приоритетный риск.
-
-Если есть обед — отметь это положительно.
-
-Если обеда нет в плотный рабочий день — подсвети.
-
-Сначала называй действительно важные риски, а потом менее критичные.
+Не выдумывай адресатов, решения, вложения и договоренности.
 
 ВАЖНО О ФОРМАТЕ
 
 Telegram получает обычный текст.
-Не используй Markdown.
+Не используй Markdown-разметку.
 Не используй **, *, ### для оформления.
-
 Пиши компактно.
-Для проверки календаря удобно использовать:
-
-"Главное"
-"Что проверить"
-"Ок"
-
-но не превращай ответ в огромный отчет.
-
-ВАЖНО О ПАМЯТИ
-
-Если ниже есть ПОСТОЯННАЯ ПАМЯТЬ,
-это реально сохраненные сведения.
-
-Если ниже есть ОТКРЫТЫЕ ЗАДАЧИ,
-это реально сохраненные незакрытые задачи.
-
-Не выдумывай сохраненные факты или задачи.
 """
 
 
@@ -168,7 +157,6 @@ def get_db():
         DB_PATH,
         timeout=30
     )
-
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -360,7 +348,7 @@ def delete_memory(chat_id, memory_id):
 
 
 # =========================================================
-# ПАМЯТЬ ТЕКУЩЕГО ДИАЛОГА OPENAI
+# ПАМЯТЬ ДИАЛОГА OPENAI
 # =========================================================
 
 def get_previous_response_id(chat_id):
@@ -467,15 +455,12 @@ def get_yandex_client():
 
 def get_yandex_calendars():
     client = get_yandex_client()
-
     principal = client.principal()
 
     try:
-        calendars = principal.get_calendars()
+        return principal.get_calendars()
     except AttributeError:
-        calendars = principal.calendars()
-
-    return calendars
+        return principal.calendars()
 
 
 def normalize_calendar_datetime(value):
@@ -494,14 +479,12 @@ def normalize_calendar_datetime(value):
         return dt, False
 
     if isinstance(value, date):
-        dt = datetime(
+        return datetime(
             value.year,
             value.month,
             value.day,
             tzinfo=CALENDAR_TZ
-        )
-
-        return dt, True
+        ), True
 
     return None, False
 
@@ -525,9 +508,8 @@ def extract_attendees(component):
         ]
 
     for attendee in raw_attendees:
-        value = str(attendee)
-
         name = ""
+        participation = ""
 
         try:
             name = attendee.params.get(
@@ -536,8 +518,6 @@ def extract_attendees(component):
             )
         except Exception:
             pass
-
-        participation = ""
 
         try:
             participation = attendee.params.get(
@@ -549,7 +529,7 @@ def extract_attendees(component):
 
         attendees.append({
             "name": str(name),
-            "value": value,
+            "value": str(attendee),
             "partstat": str(participation)
         })
 
@@ -588,78 +568,62 @@ def extract_event_from_ical(
         if not dtstart_property:
             continue
 
-        start, all_day = (
-            normalize_calendar_datetime(
-                dtstart_property.dt
-            )
+        start, all_day = normalize_calendar_datetime(
+            dtstart_property.dt
         )
 
         if start is None:
             continue
 
+        end = None
+
         dtend_property = component.get(
             "DTEND"
         )
 
-        end = None
-
         if dtend_property:
-            end, _ = (
-                normalize_calendar_datetime(
-                    dtend_property.dt
-                )
+            end, _ = normalize_calendar_datetime(
+                dtend_property.dt
             )
-
-        summary = str(
-            component.get(
-                "SUMMARY",
-                "Без названия"
-            )
-        )
-
-        location = str(
-            component.get(
-                "LOCATION",
-                ""
-            )
-        )
-
-        description = str(
-            component.get(
-                "DESCRIPTION",
-                ""
-            )
-        )
-
-        url = str(
-            component.get(
-                "URL",
-                ""
-            )
-        )
-
-        uid = str(
-            component.get(
-                "UID",
-                ""
-            )
-        )
-
-        attendees = extract_attendees(
-            component
-        )
 
         result.append({
-            "uid": uid,
-            "summary": summary,
+            "uid": str(
+                component.get(
+                    "UID",
+                    ""
+                )
+            ),
+            "summary": str(
+                component.get(
+                    "SUMMARY",
+                    "Без названия"
+                )
+            ),
             "start": start,
             "end": end,
             "all_day": all_day,
-            "location": location,
-            "description": description,
-            "url": url,
+            "location": str(
+                component.get(
+                    "LOCATION",
+                    ""
+                )
+            ),
+            "description": str(
+                component.get(
+                    "DESCRIPTION",
+                    ""
+                )
+            ),
+            "url": str(
+                component.get(
+                    "URL",
+                    ""
+                )
+            ),
             "calendar": calendar_name,
-            "attendees": attendees
+            "attendees": extract_attendees(
+                component
+            )
         })
 
     return result
@@ -689,7 +653,6 @@ def get_calendar_events(
                 end=end_dt,
                 expand=True
             )
-
         except TypeError:
             events = calendar.date_search(
                 start_dt,
@@ -699,27 +662,19 @@ def get_calendar_events(
 
         for event in events:
             try:
-                parsed_events = (
+                collected.extend(
                     extract_event_from_ical(
                         event.data,
                         calendar_name
                     )
                 )
-
-                collected.extend(
-                    parsed_events
-                )
-
             except Exception as e:
                 print(
                     "Calendar parse error:",
                     repr(e)
                 )
 
-    # -----------------------------------------------------
-    # УДАЛЯЕМ ДУБЛИ ИЗ РАЗНЫХ КАЛЕНДАРЕЙ
-    # -----------------------------------------------------
-
+    # Убираем дубли между календарями Маши и МС.
     unique = {}
 
     for event in collected:
@@ -735,14 +690,10 @@ def get_calendar_events(
             else ""
         )
 
-        summary_key = (
+        key = (
             event["summary"]
             .strip()
-            .lower()
-        )
-
-        key = (
-            summary_key,
+            .lower(),
             start_key,
             end_key
         )
@@ -752,9 +703,6 @@ def get_calendar_events(
             continue
 
         existing = unique[key]
-
-        # Если второй экземпляр содержит больше информации,
-        # дополняем первый.
 
         if (
             not existing["location"]
@@ -793,15 +741,11 @@ def get_calendar_events(
     )
 
     result.sort(
-        key=lambda event: event["start"]
+        key=lambda item: item["start"]
     )
 
     return result
 
-
-# =========================================================
-# ОБЫЧНЫЙ ВЫВОД КАЛЕНДАРЯ
-# =========================================================
 
 def format_event(event):
     start = event["start"]
@@ -817,8 +761,8 @@ def format_event(event):
         )
 
     else:
-        time_text = (
-            start.strftime("%H:%M")
+        time_text = start.strftime(
+            "%H:%M"
         )
 
     text = (
@@ -861,20 +805,14 @@ def format_calendar_day(
             "В календаре событий нет."
         )
 
-    lines = [
-        title
-    ]
+    lines = [title]
 
     for event in events:
         lines.append(
-            format_event(
-                event
-            )
+            format_event(event)
         )
 
-    return "\n\n".join(
-        lines
-    )
+    return "\n\n".join(lines)
 
 
 def format_calendar_period(
@@ -935,14 +873,8 @@ def format_calendar_period(
     for event_date in sorted(
         grouped.keys()
     ):
-        weekday = (
-            weekday_names[
-                event_date.weekday()
-            ]
-        )
-
         lines.append(
-            f"{weekday}, "
+            f"{weekday_names[event_date.weekday()]}, "
             f"{event_date.strftime('%d.%m')}"
         )
 
@@ -950,9 +882,7 @@ def format_calendar_period(
             event_date
         ]:
             lines.append(
-                format_event(
-                    event
-                )
+                format_event(event)
             )
 
         lines.append("")
@@ -961,10 +891,6 @@ def format_calendar_period(
         lines
     ).strip()
 
-
-# =========================================================
-# КАЛЕНДАРНЫЙ КОНТЕКСТ ДЛЯ ИИ
-# =========================================================
 
 def calendar_context(
     start_date,
@@ -988,36 +914,14 @@ def calendar_context(
     )
 
     lines = [
-        "КАЛЕНДАРЬ:",
-        (
-            "Период: "
-            f"{start_date.strftime('%d.%m.%Y')}"
-            + (
-                ""
-                if days == 1
-                else (
-                    " — "
-                    + (
-                        start_date
-                        + timedelta(
-                            days=days - 1
-                        )
-                    ).strftime(
-                        "%d.%m.%Y"
-                    )
-                )
-            )
-        )
+        "КАЛЕНДАРЬ:"
     ]
 
     if not events:
         lines.append(
             "Событий нет."
         )
-
-        return "\n".join(
-            lines
-        )
+        return "\n".join(lines)
 
     for index, event in enumerate(
         events,
@@ -1065,50 +969,31 @@ def calendar_context(
         )
 
         lines.append(
-            "Календарь-источник: "
-            f"{event['calendar']}"
+            "Место/адрес: "
+            + (
+                event["location"]
+                or "не указано"
+            )
         )
 
-        if event["location"]:
-            lines.append(
-                "Место/адрес: "
-                + event["location"]
-            )
-        else:
-            lines.append(
-                "Место/адрес: "
-                "не указано в данных события"
-            )
+        description = (
+            event["description"]
+            .strip()
+        )
 
-        if event["description"]:
-            # Не отправляем модели бесконечно длинные описания.
+        if len(description) > 2500:
             description = (
-                event["description"]
-                .strip()
+                description[:2500]
+                + "..."
             )
 
-            if len(description) > 2500:
-                description = (
-                    description[:2500]
-                    + "..."
-                )
-
-            lines.append(
-                "Описание события: "
-                + description
+        lines.append(
+            "Описание: "
+            + (
+                description
+                or "не указано"
             )
-
-        else:
-            lines.append(
-                "Описание события: "
-                "не указано"
-            )
-
-        if event["url"]:
-            lines.append(
-                "URL события: "
-                + event["url"]
-            )
+        )
 
         attendees = event.get(
             "attendees",
@@ -1124,14 +1009,10 @@ def calendar_context(
                     or attendee["value"]
                 )
 
-                partstat = (
-                    attendee["partstat"]
-                    or "не указан"
-                )
-
                 attendee_lines.append(
                     f"{name} "
-                    f"(статус: {partstat})"
+                    f"(статус: "
+                    f"{attendee['partstat'] or 'не указан'})"
                 )
 
             lines.append(
@@ -1141,13 +1022,564 @@ def calendar_context(
                 )
             )
 
+    return "\n".join(lines)
+
+
+# =========================================================
+# ЯНДЕКС.ПОЧТА — READ ONLY
+# =========================================================
+
+def decode_mime_header(value):
+    if not value:
+        return ""
+
+    try:
+        return str(
+            make_header(
+                decode_header(value)
+            )
+        )
+    except Exception:
+        return str(value)
+
+
+def get_mail_connection():
+    mail = imaplib.IMAP4_SSL(
+        YANDEX_IMAP_HOST,
+        YANDEX_IMAP_PORT
+    )
+
+    mail.login(
+        YANDEX_MAIL_LOGIN,
+        YANDEX_MAIL_PASSWORD
+    )
+
+    return mail
+
+
+def clean_html_text(value):
+    if not value:
+        return ""
+
+    value = re.sub(
+        r"(?is)<(script|style).*?>.*?</\1>",
+        " ",
+        value
+    )
+
+    value = re.sub(
+        r"(?s)<[^>]+>",
+        " ",
+        value
+    )
+
+    value = html.unescape(
+        value
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value
+    )
+
+    return value.strip()
+
+
+def decode_part_payload(part):
+    try:
+        payload = part.get_payload(
+            decode=True
+        )
+
+        if payload is None:
+            return ""
+
+        charset = part.get_content_charset()
+
+        if not charset:
+            charset = "utf-8"
+
+        try:
+            return payload.decode(
+                charset,
+                errors="replace"
+            )
+
+        except LookupError:
+            return payload.decode(
+                "utf-8",
+                errors="replace"
+            )
+
+    except Exception:
+        return ""
+
+
+def extract_mail_body(message):
+    plain_parts = []
+    html_parts = []
+
+    if message.is_multipart():
+        for part in message.walk():
+            content_type = (
+                part.get_content_type()
+            )
+
+            disposition = str(
+                part.get(
+                    "Content-Disposition",
+                    ""
+                )
+            ).lower()
+
+            # Вложения в текст письма не подмешиваем.
+            if "attachment" in disposition:
+                continue
+
+            if content_type == "text/plain":
+                text = decode_part_payload(
+                    part
+                )
+
+                if text:
+                    plain_parts.append(
+                        text
+                    )
+
+            elif content_type == "text/html":
+                text = decode_part_payload(
+                    part
+                )
+
+                if text:
+                    html_parts.append(
+                        clean_html_text(text)
+                    )
+
+    else:
+        content_type = (
+            message.get_content_type()
+        )
+
+        text = decode_part_payload(
+            message
+        )
+
+        if content_type == "text/html":
+            html_parts.append(
+                clean_html_text(text)
+            )
+        else:
+            plain_parts.append(
+                text
+            )
+
+    if plain_parts:
+        body = "\n".join(
+            plain_parts
+        )
+
+    elif html_parts:
+        body = "\n".join(
+            html_parts
+        )
+
+    else:
+        body = ""
+
+    # Для OpenAI не нужно пересылать бесконечные цепочки.
+    body = body.strip()
+
+    if len(body) > 8000:
+        body = (
+            body[:8000]
+            + "\n...[письмо сокращено]"
+        )
+
+    return body
+
+
+def get_attachment_names(message):
+    names = []
+
+    for part in message.walk():
+        filename = part.get_filename()
+
+        if filename:
+            names.append(
+                decode_mime_header(
+                    filename
+                )
+            )
+
+    return names
+
+
+def parse_email_date(value):
+    if not value:
+        return None
+
+    try:
+        dt = parsedate_to_datetime(
+            value
+        )
+
+        if dt is None:
+            return None
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=CALENDAR_TZ
+            )
+        else:
+            dt = dt.astimezone(
+                CALENDAR_TZ
+            )
+
+        return dt
+
+    except Exception:
+        return None
+
+
+def fetch_mail_message(
+    mail,
+    message_id
+):
+    status, data = mail.fetch(
+        message_id,
+        "(RFC822)"
+    )
+
+    if status != "OK":
+        return None
+
+    raw_email = None
+
+    for item in data:
+        if (
+            isinstance(item, tuple)
+            and len(item) >= 2
+        ):
+            raw_email = item[1]
+            break
+
+    if not raw_email:
+        return None
+
+    message = email.message_from_bytes(
+        raw_email
+    )
+
+    return {
+        "id": (
+            message_id.decode()
+            if isinstance(
+                message_id,
+                bytes
+            )
+            else str(message_id)
+        ),
+        "subject": decode_mime_header(
+            message.get(
+                "Subject",
+                ""
+            )
+        ),
+        "from": decode_mime_header(
+            message.get(
+                "From",
+                ""
+            )
+        ),
+        "to": decode_mime_header(
+            message.get(
+                "To",
+                ""
+            )
+        ),
+        "date": parse_email_date(
+            message.get(
+                "Date",
+                ""
+            )
+        ),
+        "body": extract_mail_body(
+            message
+        ),
+        "attachments": (
+            get_attachment_names(
+                message
+            )
+        )
+    }
+
+
+def get_recent_mail(
+    limit=10
+):
+    mail = get_mail_connection()
+
+    try:
+        status, _ = mail.select(
+            "INBOX",
+            readonly=True
+        )
+
+        if status != "OK":
+            raise RuntimeError(
+                "Не удалось открыть INBOX"
+            )
+
+        status, data = mail.search(
+            None,
+            "ALL"
+        )
+
+        if status != "OK":
+            return []
+
+        ids = data[0].split()
+
+        ids = ids[
+            -limit:
+        ]
+
+        ids.reverse()
+
+        messages = []
+
+        for message_id in ids:
+            item = fetch_mail_message(
+                mail,
+                message_id
+            )
+
+            if item:
+                messages.append(
+                    item
+                )
+
+        return messages
+
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
+def search_recent_mail(
+    query,
+    scan_limit=100,
+    result_limit=10
+):
+    """
+    Для надежной работы с русским текстом
+    не полагаемся на серверный IMAP SEARCH UTF-8.
+
+    Берем последние письма и ищем локально
+    в теме, отправителе, получателе и тексте.
+    """
+
+    query = query.strip().lower()
+
+    if not query:
+        return []
+
+    mail = get_mail_connection()
+
+    try:
+        status, _ = mail.select(
+            "INBOX",
+            readonly=True
+        )
+
+        if status != "OK":
+            raise RuntimeError(
+                "Не удалось открыть INBOX"
+            )
+
+        status, data = mail.search(
+            None,
+            "ALL"
+        )
+
+        if status != "OK":
+            return []
+
+        ids = data[0].split()
+
+        ids = ids[
+            -scan_limit:
+        ]
+
+        ids.reverse()
+
+        results = []
+
+        for message_id in ids:
+            item = fetch_mail_message(
+                mail,
+                message_id
+            )
+
+            if not item:
+                continue
+
+            haystack = (
+                item["subject"]
+                + "\n"
+                + item["from"]
+                + "\n"
+                + item["to"]
+                + "\n"
+                + item["body"]
+            ).lower()
+
+            if query in haystack:
+                results.append(
+                    item
+                )
+
+            if (
+                len(results)
+                >= result_limit
+            ):
+                break
+
+        return results
+
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+
+
+def format_mail_date(dt):
+    if not dt:
+        return "дата неизвестна"
+
+    return dt.strftime(
+        "%d.%m.%Y %H:%M"
+    )
+
+
+def format_mail_list(
+    messages,
+    title
+):
+    if not messages:
+        return (
+            f"{title}\n\n"
+            "Ничего не нашла."
+        )
+
+    lines = [
+        title
+    ]
+
+    for index, item in enumerate(
+        messages,
+        start=1
+    ):
+        lines.append(
+            "\n"
+            f"{index}. "
+            f"{format_mail_date(item['date'])}\n"
+            f"От: {item['from']}\n"
+            f"Тема: {item['subject']}"
+        )
+
+        if item["attachments"]:
+            lines.append(
+                "Вложения: "
+                + ", ".join(
+                    item["attachments"]
+                )
+            )
+
+    return "\n".join(
+        lines
+    )
+
+
+def mail_context(
+    messages
+):
+    lines = [
+        "ПОЧТА:"
+    ]
+
+    if not messages:
+        lines.append(
+            "Подходящих писем не найдено."
+        )
+
+        return "\n".join(
+            lines
+        )
+
+    for index, item in enumerate(
+        messages,
+        start=1
+    ):
+        lines.append("")
+        lines.append(
+            f"Письмо {index}"
+        )
+
+        lines.append(
+            "Дата: "
+            + format_mail_date(
+                item["date"]
+            )
+        )
+
+        lines.append(
+            "От: "
+            + item["from"]
+        )
+
+        lines.append(
+            "Кому: "
+            + item["to"]
+        )
+
+        lines.append(
+            "Тема: "
+            + item["subject"]
+        )
+
+        if item["attachments"]:
+            lines.append(
+                "Вложения: "
+                + ", ".join(
+                    item["attachments"]
+                )
+            )
+        else:
+            lines.append(
+                "Вложения: нет"
+            )
+
+        lines.append(
+            "Текст:\n"
+            + (
+                item["body"]
+                or "[текст письма пуст]"
+            )
+        )
+
     return "\n".join(
         lines
     )
 
 
 # =========================================================
-# ПАМЯТЬ + ЗАДАЧИ ДЛЯ OPENAI
+# ПАМЯТЬ И ЗАДАЧИ ДЛЯ OPENAI
 # =========================================================
 
 def build_saved_context(
@@ -1164,28 +1596,24 @@ def build_saved_context(
     sections = []
 
     if memories:
-        lines = [
-            f"- {row['text']}"
-            for row in memories
-        ]
-
         sections.append(
             "ПОСТОЯННАЯ ПАМЯТЬ:\n"
-            + "\n".join(lines)
+            + "\n".join(
+                f"- {row['text']}"
+                for row in memories
+            )
         )
 
     if tasks:
-        lines = [
-            (
-                f"- Задача #{row['id']}: "
-                f"{row['text']}"
-            )
-            for row in tasks
-        ]
-
         sections.append(
             "ОТКРЫТЫЕ ЗАДАЧИ:\n"
-            + "\n".join(lines)
+            + "\n".join(
+                (
+                    f"- Задача #{row['id']}: "
+                    f"{row['text']}"
+                )
+                for row in tasks
+            )
         )
 
     return "\n\n".join(
@@ -1220,14 +1648,14 @@ def extract_openai_text(
                 content.get("type")
                 == "output_text"
             ):
-                text = content.get(
+                value = content.get(
                     "text",
                     ""
                 )
 
-                if text:
+                if value:
                     texts.append(
-                        text
+                        value
                     )
 
     if texts:
@@ -1246,13 +1674,11 @@ def ask_openai(
     user_text,
     extra_context=""
 ):
-    saved_context = (
-        build_saved_context(
-            chat_id
-        )
-    )
-
     sections = []
+
+    saved_context = build_saved_context(
+        chat_id
+    )
 
     if saved_context:
         sections.append(
@@ -1269,16 +1695,14 @@ def ask_openai(
         + user_text
     )
 
-    full_input = "\n\n".join(
-        sections
-    )
-
     payload = {
         "model": "gpt-5.6",
         "instructions": (
             ASSISTANT_INSTRUCTIONS
         ),
-        "input": full_input,
+        "input": "\n\n".join(
+            sections
+        ),
         "store": True
     }
 
@@ -1308,19 +1732,10 @@ def ask_openai(
         timeout=90
     )
 
-    # Если старая цепочка OpenAI недоступна,
-    # спокойно начинаем новую.
-    # SQLite-память и задачи при этом остаются.
-
     if (
         response.status_code == 400
         and previous_id
     ):
-        print(
-            "Old OpenAI conversation "
-            "unavailable. Starting new."
-        )
-
         clear_previous_response_id(
             chat_id
         )
@@ -1379,61 +1794,40 @@ def review_calendar(
         days
     )
 
-    review_instruction = """
-ЗАДАЧА:
-проверь реальный календарь Маши как внимательный бизнес-ассистент.
+    instruction = """
+Проверь календарь как внимательный бизнес-ассистент.
 
 Проверь:
+- пересечения;
+- встречи без 15–30 минут воздуха;
+- наличие окна на обед;
+- повестки/описания;
+- адреса;
+- Zoom-ссылки, если встреча явно онлайн;
+- подтверждения участников;
+- связь с открытыми задачами.
 
-1. Есть ли пересечения встреч.
-2. Есть ли встречи подряд без 15–30 минут воздуха.
-3. Есть ли нормальное окно на обед.
-4. Если день плотный и обеда нет — предупреди.
-5. Есть ли у событий описание/повестка в доступных данных.
-6. Есть ли место или адрес там, где это выглядит важным.
-7. Если в названии или описании явно виден Zoom/онлайн-звонок,
-   проверь, видна ли ссылка в доступных данных.
-8. Посмотри на статусы участников, если они переданы.
-9. Учитывай сохраненные задачи и постоянную память Маши.
-10. Не придумывай, является ли встреча внешней, Zoom-встречей
-    или собеседованием, если это не следует из данных.
-11. Не пугай Машу мелочами. Сначала только то, что действительно
-    требует внимания.
-
-Ответ должен быть практичным.
-
-Если всё хорошо, так и скажи.
-
-Если есть проблемы, желательно написать конкретно:
-"14:00 HR — в данных не вижу..."
-а не общими словами.
-
-Отдельно скажи, что выглядит хорошо:
-например, есть обед, есть нормальные окна, нет пересечений.
-
-Не утверждай, что что-то исправила в календаре.
+Не выдумывай отсутствующие сведения.
+Сначала важные риски.
+Отдельно коротко скажи, что выглядит хорошо.
 """
-
-    extra_context = (
-        context
-        + "\n\n"
-        + review_instruction
-    )
 
     return ask_openai(
         chat_id,
         user_request,
-        extra_context=extra_context
+        extra_context=(
+            context
+            + "\n\n"
+            + instruction
+        )
     )
 
 
 # =========================================================
-# ПОКАЗ ЗАДАЧ И ПАМЯТИ
+# ПРОСТЫЕ ПОКАЗЫ
 # =========================================================
 
-def show_tasks(
-    chat_id
-):
+def show_tasks(chat_id):
     tasks = get_open_tasks(
         chat_id
     )
@@ -1443,28 +1837,22 @@ def show_tasks(
             chat_id,
             "Сейчас открытых задач нет."
         )
-
         return
-
-    lines = [
-        "Твои открытые задачи:"
-    ]
-
-    for row in tasks:
-        lines.append(
-            f"#{row['id']} — "
-            f"{row['text']}"
-        )
 
     send_message(
         chat_id,
-        "\n\n".join(lines)
+        "Твои открытые задачи:\n\n"
+        + "\n\n".join(
+            (
+                f"#{row['id']} — "
+                f"{row['text']}"
+            )
+            for row in tasks
+        )
     )
 
 
-def show_memory(
-    chat_id
-):
+def show_memory(chat_id):
     memories = get_memories(
         chat_id
     )
@@ -1475,32 +1863,26 @@ def show_memory(
             "В постоянной памяти "
             "пока ничего нет."
         )
-
         return
-
-    lines = [
-        "Вот что я помню:"
-    ]
-
-    for row in memories:
-        lines.append(
-            f"#{row['id']} — "
-            f"{row['text']}"
-        )
 
     send_message(
         chat_id,
-        "\n\n".join(lines)
+        "Вот что я помню:\n\n"
+        + "\n\n".join(
+            (
+                f"#{row['id']} — "
+                f"{row['text']}"
+            )
+            for row in memories
+        )
     )
 
 
 # =========================================================
-# ТЕКСТОВАЯ НОРМАЛИЗАЦИЯ
+# НОРМАЛИЗАЦИЯ
 # =========================================================
 
-def strip_punctuation(
-    text
-):
+def strip_punctuation(text):
     return re.sub(
         r"[?!.,]+$",
         "",
@@ -1509,7 +1891,190 @@ def strip_punctuation(
 
 
 # =========================================================
-# КАЛЕНДАРНЫЕ КОМАНДЫ
+# КОМАНДЫ ПОЧТЫ
+# =========================================================
+
+def try_handle_mail(
+    chat_id,
+    text
+):
+    normalized = re.sub(
+        r"\s+",
+        " ",
+        text.strip()
+    ).strip()
+
+    clean = strip_punctuation(
+        normalized
+    )
+
+    # Проверка соединения
+    if clean == "/mail":
+        try:
+            mail = get_mail_connection()
+
+            status, _ = mail.select(
+                "INBOX",
+                readonly=True
+            )
+
+            mail.logout()
+
+            if status == "OK":
+                send_message(
+                    chat_id,
+                    "Связь с Яндекс.Почтой есть ✅"
+                )
+            else:
+                send_message(
+                    chat_id,
+                    "К почте подключилась, "
+                    "но INBOX открыть не удалось."
+                )
+
+        except Exception as e:
+            print(
+                "Mail connection error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не получилось подключиться "
+                "к Яндекс.Почте. "
+                "Посмотри лог в Railway."
+            )
+
+        return True
+
+    # Последние письма
+    recent_phrases = {
+        "/mailrecent",
+        "последние письма",
+        "покажи последние письма",
+        "что нового в почте",
+        "покажи последние 10 писем"
+    }
+
+    if clean in recent_phrases:
+        try:
+            send_message(
+                chat_id,
+                "Смотрю почту..."
+            )
+
+            messages = get_recent_mail(
+                limit=10
+            )
+
+            send_message(
+                chat_id,
+                format_mail_list(
+                    messages,
+                    "Последние письма:"
+                )
+            )
+
+        except Exception as e:
+            print(
+                "Mail read error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не смогла прочитать почту. "
+                "Посмотри лог в Railway."
+            )
+
+        return True
+
+    # "Найди письмо Эльдар"
+    search_patterns = [
+        r"^найди\s+письмо\s+(?:про|от|по)?\s*(.+)$",
+        r"^найди\s+письма\s+(?:про|от|по)?\s*(.+)$",
+        r"^поищи\s+письмо\s+(?:про|от|по)?\s*(.+)$",
+        r"^поиск\s+почты\s*[,:-]?\s*(.+)$",
+        r"^почта\s*[,:-]\s*(.+)$"
+    ]
+
+    for pattern in search_patterns:
+        match = re.match(
+            pattern,
+            normalized,
+            flags=re.IGNORECASE
+        )
+
+        if not match:
+            continue
+
+        query = match.group(1).strip()
+
+        if not query:
+            return False
+
+        try:
+            send_message(
+                chat_id,
+                f"Ищу в почте: {query}..."
+            )
+
+            messages = search_recent_mail(
+                query=query,
+                scan_limit=100,
+                result_limit=10
+            )
+
+            if not messages:
+                send_message(
+                    chat_id,
+                    f"По запросу «{query}» "
+                    "в последних 100 письмах ничего не нашла."
+                )
+
+                return True
+
+            # Не просто список — даем найденные письма ИИ.
+            context = mail_context(
+                messages
+            )
+
+            answer = ask_openai(
+                chat_id,
+                (
+                    f"Я попросила найти в почте "
+                    f"письма по запросу: {query}. "
+                    "Коротко скажи, что нашлось, "
+                    "что в письмах важно и есть ли "
+                    "следующий шаг для меня."
+                ),
+                extra_context=context
+            )
+
+            send_message(
+                chat_id,
+                answer
+            )
+
+        except Exception as e:
+            print(
+                "Mail search error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не смогла выполнить поиск "
+                "по почте. Посмотри лог в Railway."
+            )
+
+        return True
+
+    return False
+
+
+# =========================================================
+# КОМАНДЫ КАЛЕНДАРЯ
 # =========================================================
 
 def try_handle_calendar(
@@ -1524,117 +2089,136 @@ def try_handle_calendar(
         CALENDAR_TZ
     ).date()
 
-    # -----------------------------------------------------
-    # ОБЫЧНЫЙ ПРОСМОТР
-    # -----------------------------------------------------
-
-    today_phrases = {
+    if clean in {
         "/today",
         "что у меня сегодня",
-        "что сегодня",
         "встречи сегодня",
-        "календарь сегодня",
-        "покажи календарь на сегодня",
-        "покажи встречи на сегодня",
-        "какие встречи сегодня",
-        "какие у меня сегодня встречи",
-        "что у меня сегодня по календарю"
-    }
+        "календарь сегодня"
+    }:
+        try:
+            send_message(
+                chat_id,
+                format_calendar_day(
+                    today,
+                    "Сегодня:"
+                )
+            )
+        except Exception as e:
+            print(
+                "Calendar error:",
+                repr(e)
+            )
 
-    tomorrow_phrases = {
+            send_message(
+                chat_id,
+                "Не смогла прочитать календарь."
+            )
+
+        return True
+
+    if clean in {
         "/tomorrow",
         "что у меня завтра",
-        "что завтра",
         "встречи завтра",
-        "календарь завтра",
-        "покажи календарь на завтра",
-        "покажи встречи на завтра",
-        "какие встречи завтра",
-        "какие у меня завтра встречи",
-        "что у меня завтра по календарю"
-    }
+        "календарь завтра"
+    }:
+        try:
+            tomorrow = (
+                today
+                + timedelta(days=1)
+            )
 
-    week_phrases = {
+            send_message(
+                chat_id,
+                format_calendar_day(
+                    tomorrow,
+                    "Завтра:"
+                )
+            )
+
+        except Exception as e:
+            print(
+                "Calendar error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не смогла прочитать календарь."
+            )
+
+        return True
+
+    if clean in {
         "/week",
         "календарь на неделю",
-        "покажи неделю",
-        "что у меня на неделю",
-        "что у меня на этой неделе",
         "встречи на неделю",
-        "покажи встречи на неделю"
-    }
+        "что у меня на этой неделе"
+    }:
+        try:
+            send_message(
+                chat_id,
+                format_calendar_period(
+                    today,
+                    7
+                )
+            )
 
-    # -----------------------------------------------------
-    # УМНАЯ ПРОВЕРКА
-    # -----------------------------------------------------
+        except Exception as e:
+            print(
+                "Calendar error:",
+                repr(e)
+            )
 
-    review_today_phrases = {
+            send_message(
+                chat_id,
+                "Не смогла прочитать календарь."
+            )
+
+        return True
+
+    if clean in {
         "/checktoday",
         "проверь сегодня",
-        "проверь мой сегодня",
-        "проверь сегодняшний день",
-        "проверь календарь на сегодня",
-        "проверь мой календарь на сегодня",
-        "проверь мои встречи сегодня"
-    }
+        "проверь календарь на сегодня"
+    }:
+        try:
+            send_message(
+                chat_id,
+                "Проверяю календарь..."
+            )
 
-    review_tomorrow_phrases = {
+            answer = review_calendar(
+                chat_id,
+                today,
+                1,
+                text
+            )
+
+            send_message(
+                chat_id,
+                answer
+            )
+
+        except Exception as e:
+            print(
+                "Calendar review error:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "Не смогла проверить календарь."
+            )
+
+        return True
+
+    if clean in {
         "/checktomorrow",
         "проверь завтра",
-        "проверь мой завтра",
-        "проверь завтрашний день",
         "проверь календарь на завтра",
-        "проверь мой календарь на завтра",
-        "проверь мои встречи завтра"
-    }
-
-    review_week_phrases = {
-        "/checkweek",
-        "проверь неделю",
-        "проверь мою неделю",
-        "проверь календарь на неделю",
-        "проверь мой календарь на неделю",
-        "проверь встречи на неделю"
-    }
-
-    # -----------------------------------------------------
-    # УМНАЯ ПРОВЕРКА СНАЧАЛА
-    # -----------------------------------------------------
-
-    if clean in review_today_phrases:
-        try:
-            send_message(
-                chat_id,
-                "Проверяю календарь..."
-            )
-
-            answer = review_calendar(
-                chat_id,
-                today,
-                1,
-                text
-            )
-
-            send_message(
-                chat_id,
-                answer
-            )
-
-        except Exception as e:
-            print(
-                "Calendar review error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не смогла проверить календарь. "
-                "Посмотри лог в Railway."
-            )
-
-        return True
-
-    if clean in review_tomorrow_phrases:
+        "проверь мой календарь на завтра"
+    }:
         try:
             tomorrow = (
                 today
@@ -1666,131 +2250,7 @@ def try_handle_calendar(
 
             send_message(
                 chat_id,
-                "Не смогла проверить календарь. "
-                "Посмотри лог в Railway."
-            )
-
-        return True
-
-    if clean in review_week_phrases:
-        try:
-            send_message(
-                chat_id,
-                "Проверяю неделю..."
-            )
-
-            answer = review_calendar(
-                chat_id,
-                today,
-                7,
-                text
-            )
-
-            send_message(
-                chat_id,
-                answer
-            )
-
-        except Exception as e:
-            print(
-                "Calendar review error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не смогла проверить календарь. "
-                "Посмотри лог в Railway."
-            )
-
-        return True
-
-    # -----------------------------------------------------
-    # ОБЫЧНЫЙ ПРОСМОТР
-    # -----------------------------------------------------
-
-    if clean in today_phrases:
-        try:
-            result = format_calendar_day(
-                today,
-                "Сегодня:"
-            )
-
-            send_message(
-                chat_id,
-                result
-            )
-
-        except Exception as e:
-            print(
-                "Yandex Calendar error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не смогла прочитать "
-                "Яндекс.Календарь. "
-                "Посмотри лог в Railway."
-            )
-
-        return True
-
-    if clean in tomorrow_phrases:
-        try:
-            tomorrow = (
-                today
-                + timedelta(days=1)
-            )
-
-            result = format_calendar_day(
-                tomorrow,
-                "Завтра:"
-            )
-
-            send_message(
-                chat_id,
-                result
-            )
-
-        except Exception as e:
-            print(
-                "Yandex Calendar error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не смогла прочитать "
-                "Яндекс.Календарь. "
-                "Посмотри лог в Railway."
-            )
-
-        return True
-
-    if clean in week_phrases:
-        try:
-            result = format_calendar_period(
-                today,
-                7
-            )
-
-            send_message(
-                chat_id,
-                result
-            )
-
-        except Exception as e:
-            print(
-                "Yandex Calendar error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не смогла прочитать "
-                "Яндекс.Календарь. "
-                "Посмотри лог в Railway."
+                "Не смогла проверить календарь."
             )
 
         return True
@@ -1799,7 +2259,7 @@ def try_handle_calendar(
 
 
 # =========================================================
-# ОСТАЛЬНЫЕ КОМАНДЫ
+# ЗАДАЧИ / ПАМЯТЬ / СЛУЖЕБНЫЕ КОМАНДЫ
 # =========================================================
 
 def try_handle_command(
@@ -1816,35 +2276,21 @@ def try_handle_command(
         normalized
     )
 
-    # -----------------------------------------------------
-    # START
-    # -----------------------------------------------------
-
     if clean == "/start":
         send_message(
             chat_id,
             "Привет 👋 Я Маша 2.0.\n\n"
-            "У меня есть ИИ, постоянная память, "
-            "база задач и Яндекс.Календарь."
+            "У меня есть ИИ, память, задачи, "
+            "Яндекс.Календарь и read-only Яндекс.Почта."
         )
-
         return True
-
-    # -----------------------------------------------------
-    # HEALTH
-    # -----------------------------------------------------
 
     if clean == "/health":
         send_message(
             chat_id,
             "Я работаю ✅"
         )
-
         return True
-
-    # -----------------------------------------------------
-    # NEW
-    # -----------------------------------------------------
 
     if clean == "/new":
         clear_previous_response_id(
@@ -1853,98 +2299,23 @@ def try_handle_command(
 
         send_message(
             chat_id,
-            "Готово. Начинаем новый разговор.\n\n"
+            "Начинаем новый разговор. "
             "Память и задачи я не забыла."
         )
-
         return True
 
-    # -----------------------------------------------------
-    # CALENDAR CONNECTION
-    # -----------------------------------------------------
-
-    if clean == "/calendar":
-        try:
-            calendars = (
-                get_yandex_calendars()
-            )
-
-            names = []
-
-            for calendar in calendars:
-                name = (
-                    getattr(
-                        calendar,
-                        "name",
-                        None
-                    )
-                    or "Календарь"
-                )
-
-                names.append(
-                    name
-                )
-
-            if names:
-                result = (
-                    "Связь с Яндекс.Календарём есть ✅\n\n"
-                    "Нашла календари:\n"
-                    + "\n".join(
-                        f"• {name}"
-                        for name in names
-                    )
-                )
-
-            else:
-                result = (
-                    "К Яндекс.Календарю подключилась, "
-                    "но календарей не нашла."
-                )
-
-            send_message(
-                chat_id,
-                result
-            )
-
-        except Exception as e:
-            print(
-                "Calendar connection error:",
-                repr(e)
-            )
-
-            send_message(
-                chat_id,
-                "Не получилось подключиться "
-                "к Яндекс.Календарю."
-            )
-
-        return True
-
-    # -----------------------------------------------------
-    # TASK LIST
-    # -----------------------------------------------------
-
-    task_list_phrases = {
+    if clean in {
         "/tasks",
         "задачи",
         "мои задачи",
         "покажи задачи",
         "покажи мои задачи",
-        "что у меня в задачах",
-        "какие у меня задачи",
-        "что у меня по задачам"
-    }
-
-    if clean in task_list_phrases:
+        "что у меня в задачах"
+    }:
         show_tasks(
             chat_id
         )
-
         return True
-
-    # -----------------------------------------------------
-    # COMPLETE TASK
-    # -----------------------------------------------------
 
     done_match = re.match(
         r"^(?:"
@@ -1973,18 +2344,14 @@ def try_handle_command(
                 chat_id,
                 f"Задачу #{task_id} закрыла ✅"
             )
-
         else:
             send_message(
                 chat_id,
-                f"Не нашла открытую задачу #{task_id}."
+                f"Не нашла открытую "
+                f"задачу #{task_id}."
             )
 
         return True
-
-    # -----------------------------------------------------
-    # ADD TASK
-    # -----------------------------------------------------
 
     task_patterns = [
         r"^задача\s*[,:-]?\s+(.+)$",
@@ -2025,30 +2392,17 @@ def try_handle_command(
 
             return True
 
-    # -----------------------------------------------------
-    # SHOW MEMORY
-    # -----------------------------------------------------
-
-    memory_phrases = {
+    if clean in {
         "/memory",
         "что ты помнишь",
         "покажи память",
-        "покажи свою память",
         "что у тебя в памяти",
-        "что ты обо мне помнишь",
         "что ты запомнила"
-    }
-
-    if clean in memory_phrases:
+    }:
         show_memory(
             chat_id
         )
-
         return True
-
-    # -----------------------------------------------------
-    # DELETE MEMORY
-    # -----------------------------------------------------
 
     forget_match = re.match(
         r"^(?:"
@@ -2073,9 +2427,9 @@ def try_handle_command(
         ):
             send_message(
                 chat_id,
-                f"Удалила запись #{memory_id} из памяти."
+                f"Удалила запись "
+                f"#{memory_id} из памяти."
             )
-
         else:
             send_message(
                 chat_id,
@@ -2083,10 +2437,6 @@ def try_handle_command(
             )
 
         return True
-
-    # -----------------------------------------------------
-    # ADD MEMORY
-    # -----------------------------------------------------
 
     memory_patterns = [
         r"^запомни\s*,?\s*что\s+(.+)$",
@@ -2135,9 +2485,8 @@ def main():
     init_db()
 
     print(
-        "Masha 2.0 запущена. "
-        "SQLite + OpenAI + "
-        "Yandex Calendar + smart review."
+        "Masha 2.0 запущена: "
+        "SQLite + OpenAI + Calendar + Mail read-only"
     )
 
     offset = None
@@ -2197,14 +2546,21 @@ def main():
                     repr(text)
                 )
 
-                # Сначала календарь
+                # Сначала почта
+                if try_handle_mail(
+                    chat_id,
+                    text
+                ):
+                    continue
+
+                # Потом календарь
                 if try_handle_calendar(
                     chat_id,
                     text
                 ):
                     continue
 
-                # Затем задачи и память
+                # Потом задачи и память
                 if try_handle_command(
                     chat_id,
                     text
@@ -2250,8 +2606,7 @@ def main():
                     send_message(
                         chat_id,
                         "Я дошла до OpenAI, "
-                        "но получила ошибку API. "
-                        "Посмотри лог в Railway."
+                        "но получила ошибку API."
                     )
 
                 except Exception as e:
@@ -2262,8 +2617,8 @@ def main():
 
                     send_message(
                         chat_id,
-                        "У меня возникла техническая ошибка "
-                        "при обращении к ИИ."
+                        "У меня возникла техническая "
+                        "ошибка при обращении к ИИ."
                     )
 
         except requests.RequestException as e:
